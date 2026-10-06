@@ -116,8 +116,8 @@ const QA = (pub: boolean): { q: string; a: string }[] => [
     q: tr(`Wie empfange ich ${STABLE_SYMBOL}?`, `How do I receive ${STABLE_SYMBOL}?`),
     a: pub
       ? tr(
-          `Unter „Wallet“ steht die Adresse deiner verbundenen Wallet, auch als QR-Code. An dieselbe Adresse gehen ${NATIVE} und ${STABLE_SYMBOL}. ${STABLE_SYMBOL}, die über K.Lend an dich gesendet werden, erscheinen dort sofort.`,
-          `Under “Wallet” you'll find the address of your connected wallet, also as a QR code. ${NATIVE} and ${STABLE_SYMBOL} both go to that address. ${STABLE_SYMBOL} sent to you via K.Lend shows up there immediately.`,
+          `Unter „Wallet“ steht die Adresse deiner verbundenen Wallet, auch als QR-Code. An dieselbe Adresse gehen ${NATIVE} und ${STABLE_SYMBOL}. ${STABLE_SYMBOL}, die über K.Lend an dich gesendet werden, erscheinen dort sofort. Kam eine Sendung auf anderem Weg, trägst du unter „Wallet“ den Betrag ein, den dir der Absender nennt, und die Seite sucht genau diesen Token.`,
+          `Under “Wallet” you'll find the address of your connected wallet, also as a QR code. ${NATIVE} and ${STABLE_SYMBOL} both go to that address. ${STABLE_SYMBOL} sent to you via K.Lend shows up there immediately. If a transfer came another way, enter the amount the sender gives you under “Wallet”, and the site looks for exactly that token.`,
         )
       : tr(
       `Unter „Wallet“ steht deine Adresse, auch als QR-Code. An dieselbe Adresse gehen ${NATIVE} und ${STABLE_SYMBOL}. ${NATIVE} erscheinen von selbst. ${STABLE_SYMBOL} liegen in eigenen Token-UTXOs, deren Adresse vom Betrag abhängt. Kommt eine Sendung von einem anderen Rechner, trägst du unter „Wallet“ den Betrag ein, den dir der Absender nennt, und die Seite sucht genau diesen Token. Was du von dieser Seite aus an eigene Schlüsseldateien schickst, erscheint sofort.`,

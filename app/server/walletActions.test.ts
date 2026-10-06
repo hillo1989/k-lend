@@ -12,6 +12,7 @@ import { createGhostApi, redactPaths } from "./api.ts";
 import { ValidationError } from "./actions.ts";
 import {
   buildWalletBuildArgs,
+  buildWalletReceiveArgs,
   buildWalletSubmitCall,
   clientKey,
   createRateLimiter,
@@ -465,5 +466,19 @@ describe("Audit 17: Wallet-Routen hinter dem Proxy", () => {
     const p2 = await start(dir, { walletPerMinute: 1, trustedProxies: [] });
     expect((await request(p2, "/api/wallet/build", body, { "x-forwarded-for": "203.0.113.7" })).status).toBe(200);
     expect((await request(p2, "/api/wallet/build", body, { "x-forwarded-for": "203.0.113.8" })).status).toBe(429);
+  });
+});
+
+describe("buildWalletReceiveArgs (öffentliche GHOST-Suche)", () => {
+  it("sucht per --owner mit der Adresse, nie per Schlüsseldatei", () => {
+    const { args } = buildWalletReceiveArgs({ network: "mainnet", address: A, ghost: "0.5" });
+    expect(args).toEqual(["--network", "mainnet", "--json", "receive", "--owner", A, "--ghost", "0.5"]);
+    expect(args).not.toContain("--key");
+  });
+  it("lehnt Dateipfade, fremde Parameter und falsche Netze ab", () => {
+    expect(() => buildWalletReceiveArgs({ network: "mainnet", address: "keys/mainnet-owner.json", ghost: "1" })).toThrow(ValidationError);
+    expect(() => buildWalletReceiveArgs({ network: "mainnet", address: A, ghost: "1", key: "keys/x.json" })).toThrow(ValidationError);
+    expect(() => buildWalletReceiveArgs({ network: "testnet-10", address: A, ghost: "1" })).toThrow(ValidationError);
+    expect(() => buildWalletReceiveArgs({ network: "mainnet", address: A, ghost: "-1" })).toThrow(ValidationError);
   });
 });

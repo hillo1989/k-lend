@@ -7,7 +7,7 @@
 @DOMAIN@ {
 	encode zstd gzip
 	header {
-		Strict-Transport-Security "max-age=31536000"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		-Server
 	}
 	# Wallet-Aktionen schicken Plan und signierte Tx (bis ~130 kB, die Seite

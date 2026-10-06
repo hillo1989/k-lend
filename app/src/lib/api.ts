@@ -126,6 +126,11 @@ export async function receiveGhost(network: NetworkId, key: string, ghost: strin
   return (await post("./api/receive", { network, key, ghost })) as unknown as ReceiveResult;
 }
 
+/** Wie receiveGhost, aber für die Adresse der Browser-Wallet (öffentliche Seite) */
+export async function receiveGhostWallet(network: NetworkId, address: string, ghost: string): Promise<ReceiveResult> {
+  return (await post("./api/wallet/receive", { network, address, ghost })) as unknown as ReceiveResult;
+}
+
 /** Eine eingegangene Nachricht (ghostctl messages) */
 export interface InboxMessage {
   txid: string;

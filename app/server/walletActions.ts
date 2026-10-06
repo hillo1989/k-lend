@@ -384,3 +384,17 @@ export function clientKey(remote: string | undefined, forwarded: string | string
   }
   return ipKey(r);
 }
+
+/**
+ * /api/wallet/receive: eingegangene GHOST mit genau diesem Betrag für die Adresse
+ * der Browser-Wallet suchen und in den Zustand übernehmen (sendet nichts, kein
+ * Geheimnis nötig). Nur Schnorr-Adresse, nie ein Dateipfad (ghostctl --owner).
+ */
+export function buildWalletReceiveArgs(r: Record<string, unknown>): { args: string[] } {
+  if (!r || typeof r !== "object" || Array.isArray(r)) throw new ValidationError("Leere Anfrage.");
+  for (const k of Object.keys(r)) if (!["network", "address", "ghost"].includes(k)) throw new ValidationError(`Unbekannter Parameter „${k}“.`);
+  const network = r.network ?? "mainnet";
+  if (!isNetwork(network)) throw new ValidationError("Unbekanntes Netz.");
+  const address = checkProbeAddress(r.address, network);
+  return { args: ["--network", network, "--json", "receive", "--owner", address, "--ghost", checkAmount(r.ghost, "GHOST-Betrag")] };
+}

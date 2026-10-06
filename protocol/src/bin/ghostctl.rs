@@ -317,10 +317,14 @@ enum Cmd {
         #[arg(long, default_value_t = 200)]
         limit: usize,
     },
-    /// Eingegangene GHOST mit genau diesem Betrag suchen und übernehmen (sendet nichts)
+    /// Eingegangene GHOST mit genau diesem Betrag suchen und übernehmen (sendet nichts).
+    /// Empfänger: Schlüsseldatei (--key) oder ohne Geheimnis eine Adresse bzw.
+    /// ein x-only-Schlüssel (--owner, öffentliche Seite mit Browser-Wallet)
     Receive {
+        #[arg(long, conflicts_with = "owner", required_unless_present = "owner")]
+        key: Option<PathBuf>,
         #[arg(long)]
-        key: PathBuf,
+        owner: Option<String>,
         #[arg(long)]
         ghost: f64,
     },
@@ -1728,12 +1732,20 @@ async fn run(cli: Cli) -> Result<Option<serde_json::Value>, String> {
             ctx.send("GHOST senden", &b, Some(&nd)).await?;
             note_sent(&ctx, &b, json!({ "action": "transfer", "amount": abo::fmt_amount(g as u64), "unit": "GHOST", "to": to, "message": msg, "onchain": onchain_message, "encrypted": message::is_encrypted(&payload) }));
         }
-        Cmd::Receive { key, ghost } => {
-            let k = load_key(&key)?;
+        Cmd::Receive { key, owner, ghost } => {
+            let me = match (&key, &owner) {
+                (Some(key), _) => xonly(&load_key(key)?),
+                // nie als Dateipfad lesen: nur Adresse oder x-only (öffentlich erreichbar)
+                (None, Some(o)) => {
+                    let prefix = kaspa_addresses::Prefix::from(kaspa_lending_protocol::net::network_id(&ctx.network)?);
+                    kaspa_lending_protocol::wallet_ops::ghost_target(prefix, o)?
+                }
+                (None, None) => return Err("--key oder --owner angeben".into()),
+            };
             let mut d = ctx.load_synced().await?;
             let gcov = d.vault_params.as_ref().ok_or("nicht initialisiert")?.ghost_cov;
             let a = amount(ghost, "--ghost")?;
-            let tok = GhostTok::to_pubkey(&xonly(&k), a);
+            let tok = GhostTok::to_pubkey(&me, a);
             let tspk = spk(&tok.artifact());
             let found: Vec<_> = ctx.net.utxos(&ctx.net.address_of_spk(&tspk)?).await?.into_iter().filter(|(_, e)| e.covenant_id == Some(gcov)).collect();
             let (mut new, mut known) = (0usize, 0usize);

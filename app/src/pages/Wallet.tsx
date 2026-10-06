@@ -11,7 +11,7 @@ import { QrCode } from "../components/QrCode";
 import { AmountInput, Callout } from "../components/ui";
 import { NATIVE, NETWORKS, STABLE_SYMBOL } from "../config";
 import { href } from "../router";
-import { ApiError, receiveGhost, type ReceiveResult } from "../lib/api";
+import { ApiError, receiveGhost, receiveGhostWallet, type ReceiveResult } from "../lib/api";
 import { useAccount } from "../lib/AccountContext";
 import { actionMeta, cliDecimal } from "../lib/commands";
 import { parseUnits } from "../lib/format";
@@ -66,15 +66,15 @@ export function Wallet() {
   useEffect(() => {
     setRecv(null);
     setRecvErr(null);
-  }, [network, key?.file]);
+  }, [network, key?.file, address]);
 
   const checkReceive = async () => {
-    if (!key || recvAmount === null || recvAmount <= 0n) return;
+    if ((!key && !(pub && address)) || recvAmount === null || recvAmount <= 0n) return;
     setRecvBusy(true);
     setRecv(null);
     setRecvErr(null);
     try {
-      const r = await receiveGhost(network, key.file, cliDecimal(recvAmount));
+      const r = key ? await receiveGhost(network, key.file, cliDecimal(recvAmount)) : await receiveGhostWallet(network, address!, cliDecimal(recvAmount));
       setRecv(r);
       if (r.ok && (r.found ?? 0) > 0) acc.refresh();
     } catch (e) {
@@ -155,12 +155,12 @@ export function Wallet() {
                   </div>
                 </div>
               </div>
-              {key && (
+              {(key || pub) && (
                 <>
               <p className="small">
                 {tr(
-                  `KAS erscheinen von selbst. ${STABLE_SYMBOL} liegen in eigenen Token-UTXOs, die der Explorer unter deiner Adresse nicht zeigt. Kam die Sendung von einem anderen Rechner, trag den Betrag ein, den dir der Absender nennt. Die Seite sucht dann genau diesen Token.`,
-                  `KAS appear by themselves. ${STABLE_SYMBOL} sit in separate token UTXOs that the explorer does not show under your address. If the transfer came from another computer, enter the amount the sender tells you. The page then looks for exactly that token.`,
+                  `KAS erscheinen von selbst. ${STABLE_SYMBOL} liegen in eigenen Token-UTXOs, die der Explorer unter deiner Adresse nicht zeigt. Kam die Sendung nicht über diese Seite, trag den Betrag ein, den dir der Absender nennt. Die Seite sucht dann genau diesen Token.`,
+                  `KAS appear by themselves. ${STABLE_SYMBOL} sit in separate token UTXOs that the explorer does not show under your address. If the transfer did not come through this site, enter the amount the sender tells you. The page then looks for exactly that token.`,
                 )}
               </p>
               <form

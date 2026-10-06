@@ -16,6 +16,7 @@
 //   POST /api/wallet/build       Nutzeraktion für die Browser-Wallet bauen (ghostctl wallet build,
 //                                server/walletActions.ts; nur Adressen, nie Schlüssel, sendet nichts)
 //   POST /api/wallet/submit      Wallet-Antwort prüfen, auf Wunsch senden (ghostctl wallet submit)
+//   POST /api/wallet/receive     eingegangene GHOST für eine Wallet-Adresse suchen (sendet nichts)
 //
 // Daueraufträge: Solange der Server läuft, stößt er jede Minute
 // `ghostctl abo run --ja` an, aber nur wenn laut deployments/<netz>-abos.json
@@ -65,7 +66,7 @@ import {
 } from "./actions.ts";
 import { historyCache, parseDays } from "./history.ts";
 import { buildWalletProbeCall, PROBE_BODY_LIMIT } from "./walletProbe.ts";
-import { buildWalletBuildArgs, buildWalletSubmitCall, clientKey, createRateLimiter, LOOPBACK_PROXIES, WALLET_BODY_LIMIT } from "./walletActions.ts";
+import { buildWalletBuildArgs, buildWalletReceiveArgs, buildWalletSubmitCall, clientKey, createRateLimiter, LOOPBACK_PROXIES, WALLET_BODY_LIMIT } from "./walletActions.ts";
 
 /** ghostctl meldet in `transactions` gesendete (sent) oder unklare (unclear) Tx */
 function sentOrUnclear(txs: unknown): boolean {
@@ -557,6 +558,33 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
             return send(res, 200, j);
           } finally {
             rmSync(dir, { recursive: true, force: true });
+            busy = false;
+          }
+        }
+
+        case "POST /api/wallet/receive": {
+          // eingegangene GHOST für die Adresse der Browser-Wallet (sendet nichts)
+          const wait = walletLimiter.take(clientKey(req.socket.remoteAddress, h["x-forwarded-for"], trusted));
+          if (wait !== null) {
+            res.setHeader("Retry-After", String(wait));
+            return send(res, 429, { ok: false, error: `Zu viele Anfragen – bitte in ${wait} s erneut versuchen.` });
+          }
+          const body = (await readBody(req)) as Record<string, unknown> | null;
+          const { args } = buildWalletReceiveArgs(body ?? {});
+          if (busy) return send(res, 409, { ok: false, error: "Es läuft bereits eine Aktion – bitte gleich erneut versuchen." });
+          busy = true;
+          try {
+            const r = await run(args, readTimeout);
+            statusCache.clear();
+            const j = parseJson(r.stdout);
+            if (!j) {
+              const detail = `ghostctl receive: ${tail(r.stderr) || "keine Ausgabe"}`;
+              return send(res, 200, isNodeError(detail) ? { ok: false, nodeDown: true, error: NODE_DOWN_MESSAGE, detail } : { ok: false, error: detail });
+            }
+            if (j.ok === false && typeof j.error === "string" && isNodeError(j.error))
+              return send(res, 200, { ...j, nodeDown: true, detail: j.error, error: NODE_DOWN_MESSAGE });
+            return send(res, 200, j);
+          } finally {
             busy = false;
           }
         }
