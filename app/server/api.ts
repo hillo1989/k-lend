@@ -17,6 +17,7 @@
 //                                server/walletActions.ts; nur Adressen, nie Schlüssel, sendet nichts)
 //   POST /api/wallet/submit      Wallet-Antwort prüfen, auf Wunsch senden (ghostctl wallet submit)
 //   POST /api/wallet/receive     eingegangene GHOST für eine Wallet-Adresse suchen (sendet nichts)
+//   GET  /api/wallet/name        .k-Name (dotk.name) → Adresse, am eigenen Node geprüft
 //
 // Daueraufträge: Solange der Server läuft, stößt er jede Minute
 // `ghostctl abo run --ja` an, aber nur wenn laut deployments/<netz>-abos.json
@@ -65,6 +66,7 @@ import {
   type Network,
 } from "./actions.ts";
 import { historyCache, parseDays } from "./history.ts";
+import { resolveName } from "./dotkNames.ts";
 import { buildWalletProbeCall, PROBE_BODY_LIMIT } from "./walletProbe.ts";
 import { buildWalletBuildArgs, buildWalletReceiveArgs, buildWalletSubmitCall, clientKey, createRateLimiter, LOOPBACK_PROXIES, WALLET_BODY_LIMIT } from "./walletActions.ts";
 
@@ -560,6 +562,26 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
             rmSync(dir, { recursive: true, force: true });
             busy = false;
           }
+        }
+
+        case "GET /api/wallet/name": {
+          // .k-Name → Adresse, am eigenen Node nachgeprüft (sendet nichts)
+          const wait = walletLimiter.take(clientKey(req.socket.remoteAddress, h["x-forwarded-for"], trusted));
+          if (wait !== null) {
+            res.setHeader("Retry-After", String(wait));
+            return send(res, 429, { ok: false, error: `Zu viele Anfragen – bitte in ${wait} s erneut versuchen.` });
+          }
+          const network = url.searchParams.get("network") ?? "mainnet";
+          if (!isNetwork(network)) throw new ValidationError("Unbekanntes Netz.");
+          const utxos = async (net: typeof network, addresses: string[]) => {
+            if (addresses.length === 0) return [];
+            if (addresses.length > 50) throw new Error("zu viele Adressen");
+            const r = await run(["--network", net, "--json", "utxos", ...addresses.flatMap((a) => ["--address", a])], readTimeout);
+            const j = parseJson(r.stdout);
+            if (!j || j.ok === false || !Array.isArray(j.utxos)) throw new Error("Node nicht erreichbar");
+            return j.utxos as { address: string; covenantId?: string | null; transactionId?: string; index?: number; daaScore?: number }[];
+          };
+          return send(res, 200, await resolveName(network, url.searchParams.get("name"), utxos));
         }
 
         case "POST /api/wallet/receive": {

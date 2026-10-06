@@ -2069,3 +2069,14 @@ fieldset.plain:disabled {
     overflow-y: auto;
   }
 }
+
+/* .k-Name unter dem Empfängerfeld */
+.kname {
+  margin-top: 6px;
+}
+.kname-bad {
+  color: var(--danger, #e57373);
+}
+.addr-break {
+  word-break: break-all;
+}

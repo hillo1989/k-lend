@@ -19,6 +19,7 @@ import { useWallet } from "../wallet/WalletContext";
 import { toWalletParams, walletKeyEntry, walletSupports } from "../wallet/actions";
 import { xOnlyKey } from "../lib/status";
 import { WalletSignFlow } from "./WalletSignFlow";
+import { isKName, useKName } from "../lib/kname";
 
 /** Wer signiert: lokale Schlüsseldatei (ghostctl) oder Browser-Wallet */
 export type SignMode = "key" | "wallet";
@@ -94,6 +95,8 @@ export function ActionForms({
   const [toMode, setToMode] = useState<"key" | "free">("key");
   const [toKey, setToKey] = useState("");
   const [toFree, setToFree] = useState("");
+  // .k-Name im Empfängerfeld (dotk.name), vom Server am Node geprüft
+  const kname = useKName(toMode === "free" || signMode === "wallet" ? toFree : "", network);
   const [committee, setCommittee] = useState("");
   const [usdStr, setUsdStr] = useState("");
   const [rateStr, setRateStr] = useState("");
@@ -176,7 +179,11 @@ export function ActionForms({
     if (meta.to) {
       const t = toMode === "key" && signMode === "key" ? toKey : toFree.trim();
       if (!t) return { params: null, problem: tr("Empfänger angeben.", "Enter a recipient.") };
-      p.to = t;
+      if (isKName(t)) {
+        if (!kname || kname.input !== t || kname.loading) return { params: null, problem: tr(`${t} wird geprüft …`, `Checking ${t} …`) };
+        if (!kname.address) return { params: null, problem: kname.error ?? tr("Name nicht auflösbar.", "Name cannot be resolved.") };
+        p.to = kname.address;
+      } else p.to = t;
     }
     if (meta.amount && !useFull) {
       if (amountStr.trim() === "") return { params: null, problem: tr(`${meta.amount.label} eingeben.`, `Enter ${meta.amount.label}.`) };
@@ -215,7 +222,7 @@ export function ActionForms({
     }
     if (signMode === "wallet") return toWalletParams(action, p);
     return { params: p, problem: null };
-  }, [signMode, key, meta, vault, toMode, toKey, toFree, action, useFull, amountStr, amount, amount2Str, amount2, committee, usdStr, usd, rateStr, rate, hasMessage, message, onchain]);
+  }, [signMode, key, meta, vault, toMode, toKey, toFree, kname, action, useFull, amountStr, amount, amount2Str, amount2, committee, usdStr, usd, rateStr, rate, hasMessage, message, onchain]);
 
   // „Alles tilgen/liquidieren“: die Schuld gehört zur Signatur, sonst bliebe ein
   // alter Probelauf nach einer Schuldänderung gültig (A10-W-11)
@@ -531,11 +538,27 @@ export function ActionForms({
                     aria-label={tr("Empfänger", "Recipient")}
                     value={toFree}
                     onChange={(e) => setToFree(e.target.value)}
-                    placeholder={meta.to === "address" ? (isMain ? "kaspa:q…" : "kaspatest:q…") : tr("64 Hex-Zeichen", "64 hex characters")}
+                    placeholder={meta.to === "address" ? (isMain ? "kaspa:q… oder name.k" : "kaspatest:q… oder name.k") : tr("64 Hex-Zeichen oder name.k", "64 hex characters or name.k")}
                     spellCheck={false}
                     autoComplete="off"
                   />
                 </div>
+              )}
+              {kname && (
+                <p className={kname.error ? "small kname kname-bad" : "small kname"} aria-live="polite">
+                  {kname.loading && !kname.address
+                    ? tr("Name wird bei dotk.name nachgeschlagen und am Kaspa-Node geprüft …", "Looking up the name at dotk.name and checking it at the Kaspa node …")
+                    : kname.address
+                      ? (
+                          <>
+                            {kname.display} → <code className="addr-break">{kname.address}</code>{" "}
+                            <span className="tag">{tr("am Node geprüft", "checked at node")}</span>
+                            <br />
+                            <span className="muted">{tr("Bitte die Adresse vergleichen, bevor du signierst.", "Please compare the address before signing.")}</span>
+                          </>
+                        )
+                      : kname.error}
+                </p>
               )}
             </div>
           )}

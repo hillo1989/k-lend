@@ -328,6 +328,13 @@ enum Cmd {
         #[arg(long)]
         ghost: f64,
     },
+    /// UTXOs an Adressen vom Node (nur lesend, für die .k-Namensprüfung der Seite):
+    /// je UTXO Adresse, Covenant-ID, Outpoint und DAA-Score als JSON
+    Utxos {
+        /// höchstens 50 Adressen
+        #[arg(long, required = true, num_args = 1..=50)]
+        address: Vec<String>,
+    },
     /// Tauschpool KAS/GHOST anlegen (einmalig je Netz). 1 KAS und GHOST zum
     /// gleichen Kurs bleiben als Mindestliquidität für immer im Pool; der Rest
     /// wird eingelegt und bringt Anteile.
@@ -1763,6 +1770,26 @@ async fn run(cli: Cli) -> Result<Option<serde_json::Value>, String> {
             say!("{new} neue, {known} bekannte GHOST-UTXO(s) über {:.8} GHOST", a as f64 / 1e8);
             extra.insert("found".into(), new.into());
             extra.insert("known".into(), known.into());
+        }
+        Cmd::Utxos { address } => {
+            let prefix = kaspa_addresses::Prefix::from(kaspa_lending_protocol::net::network_id(&ctx.network)?);
+            let mut out = Vec::new();
+            for a in &address {
+                let addr = kaspa_addresses::Address::try_from(a.as_str()).map_err(|e| format!("--address: {e}"))?;
+                if addr.prefix != prefix {
+                    return Err(format!("Adresse gehört zu einem anderen Netz ({})", addr.prefix));
+                }
+                for (op, e) in ctx.net.utxos(&addr).await? {
+                    out.push(json!({
+                        "address": addr.to_string(),
+                        "covenantId": e.covenant_id.map(|c| c.to_string()),
+                        "transactionId": op.transaction_id.to_string(),
+                        "index": op.index,
+                        "daaScore": e.block_daa_score,
+                    }));
+                }
+            }
+            extra.insert("utxos".into(), out.into());
         }
         Cmd::PoolOpen { key, kas, ghost } => {
             let k = load_key(&key)?;
