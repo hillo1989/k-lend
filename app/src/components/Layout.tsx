@@ -3,6 +3,7 @@ import { PROTOCOL_NAME, PROTOCOL_SHORT } from "../config";
 import { NetworkBar } from "./Network";
 import { WalletButton } from "./WalletButton";
 import { InstallHint } from "./InstallHint";
+import { UpdateHint } from "./UpdateHint";
 import { FOOTER_ROUTES, NAV_ROUTES, href, routeLabel, type RoutePath } from "../router";
 import { tr } from "../lib/i18n";
 
@@ -62,6 +63,7 @@ export function Header({ route }: { route: RoutePath }) {
       </div>
       <NetworkBar />
       <InstallHint />
+      <UpdateHint />
     </header>
   );
 }

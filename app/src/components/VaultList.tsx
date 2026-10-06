@@ -37,36 +37,10 @@ export function VaultList({ onAction }: { onAction(action: CliAction, vault: num
     (a, b) => Number(b.owner.toLowerCase() === myKey) - Number(a.owner.toLowerCase() === myKey) || a.index - b.index,
   );
 
-  return (
-    <section className="card section-sm" aria-labelledby="vaults-title">
-      <div className="card-head">
-        <h2 id="vaults-title">{tr("Vaults im Mainnet", "Vaults on mainnet")}</h2>
-        <span className="tag">live · {vaults.length}</span>
-      </div>
-      <p className="muted small">
-        {acc.publicMode ? (
-          tr(
-            "Alle Vaults, die K.Lend kennt (Stand der Kette, nachgeführt vom Server). Die Vaults deiner verbundenen Wallet stehen oben und sind hervorgehoben.",
-            "All vaults K.Lend knows (chain state, tracked by the server). The vaults of your connected wallet are listed first and highlighted.",
-          )
-        ) : (
-          <>
-            {tr("Quelle ist ", "Source is ")}
-            <code>ghostctl status</code>
-            {tr(", also die Zustandsdatei dieses Rechners (", ", i.e. this computer's state file (")}
-            <code>deployments/{network}.json</code>
-            {tr(
-              "). Vaults anderer Rechner fehlen. Deine Vaults, die zum gewählten Schlüssel gehören, stehen oben und sind hervorgehoben.",
-              "). Vaults of other computers are missing. Your vaults belonging to the selected key are listed first and highlighted.",
-            )}
-          </>
-        )}
-      </p>
-      {vaults.length === 0 ? (
-        <p>{tr("Noch kein Vault angelegt. Unter „Aktionen“ → „Vault eröffnen“.", "No vault yet. Use “Actions” → “Open vault”.")}</p>
-      ) : (
-        <ul className="vault-list">
-          {vaults.map((v) => {
+  // öffentliche Seite: nur die Vaults der verbundenen Wallet offen, fremde eingeklappt
+  const mine = vaults.filter((v) => myKey !== null && v.owner.toLowerCase() === myKey);
+  const others = vaults.filter((v) => !(myKey !== null && v.owner.toLowerCase() === myKey));
+  const item = (v: VaultStatus) => {
             const own = myKey !== null && v.owner.toLowerCase() === myKey;
             const walletOwn = walletKey !== null && v.owner.toLowerCase() === walletKey;
             const h = health(v, status.params.liqPct);
@@ -167,8 +141,53 @@ export function VaultList({ onAction }: { onAction(action: CliAction, vault: num
                 )}
               </li>
             );
-          })}
+  };
+
+  return (
+    <section className="card section-sm" aria-labelledby="vaults-title">
+      <div className="card-head">
+        <h2 id="vaults-title">{acc.publicMode ? tr("Deine Vaults", "Your vaults") : tr("Vaults im Mainnet", "Vaults on mainnet")}</h2>
+        <span className="tag">live · {acc.publicMode ? mine.length : vaults.length}</span>
+      </div>
+      <p className="muted small">
+        {acc.publicMode ? (
+          tr(
+            "Die Vaults deiner verbundenen Wallet. Vaults anderer Nutzer stehen eingeklappt darunter – nur für Rücknahme und Liquidation.",
+            "The vaults of your connected wallet. Other users' vaults are folded below – only for redemption and liquidation.",
+          )
+        ) : (
+          <>
+            {tr("Quelle ist ", "Source is ")}
+            <code>ghostctl status</code>
+            {tr(", also die Zustandsdatei dieses Rechners (", ", i.e. this computer's state file (")}
+            <code>deployments/{network}.json</code>
+            {tr(
+              "). Vaults anderer Rechner fehlen. Deine Vaults, die zum gewählten Schlüssel gehören, stehen oben und sind hervorgehoben.",
+              "). Vaults of other computers are missing. Your vaults belonging to the selected key are listed first and highlighted.",
+            )}
+          </>
+        )}
+      </p>
+      {acc.publicMode && mine.length === 0 ? (
+        <p>
+          {myKey === null
+            ? tr("Wallet verbinden, um deine Vaults zu sehen.", "Connect your wallet to see your vaults.")
+            : tr("Diese Wallet hat noch keinen Vault. Oben „Vault eröffnen“.", "This wallet has no vault yet. Use “Open vault” above.")}
+        </p>
+      ) : vaults.length === 0 ? (
+        <p>{tr("Noch kein Vault angelegt. Unter „Aktionen“ → „Vault eröffnen“.", "No vault yet. Use “Actions” → “Open vault”.")}</p>
+      ) : (
+        <ul className="vault-list">
+          {(acc.publicMode ? mine : vaults).map(item)}
         </ul>
+      )}
+      {acc.publicMode && others.length > 0 && (
+        <details className="section-sm">
+          <summary>
+            {tr(`Fremde Vaults (${others.length}) – für Rücknahme und Liquidation`, `Other vaults (${others.length}) – for redemption and liquidation`)}
+          </summary>
+          <ul className="vault-list">{others.map(item)}</ul>
+        </details>
       )}
     </section>
   );
