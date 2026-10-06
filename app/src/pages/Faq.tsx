@@ -104,8 +104,8 @@ const QA = (pub: boolean): { q: string; a: string }[] => [
     q: tr("Welche Wallet brauche ich?", "Which wallet do I need?"),
     a: pub
       ? tr(
-          "Am Rechner Kastle oder KasWare als Browser-Erweiterung. Am Handy geht es nur im Browser einer Wallet-App: bei KasWare (Android-App) im eingebauten Browser; Kastle zeigt unter „Explore“ nur geprüfte Apps, dort ist K.Lend noch nicht aufgenommen. GHOST zeigen die gängigen Wallets noch nicht an; dafür ist die Seite „Wallet“ da.",
-          "On a computer, Kastle or KasWare as a browser extension. On a phone it only works inside a wallet app's browser: KasWare (Android app) in its built-in browser; Kastle's “Explore” only lists verified apps and K.Lend is not listed yet. Common wallets don't display GHOST yet; that's what the “Wallet” page is for.",
+          "Am Rechner Kastle oder KasWare als Browser-Erweiterung. Am Handy geht es noch nicht: Handy-Browser kennen keine Wallet-Erweiterungen, und die Apps von Kastle und KasWare öffnen K.Lend noch nicht in ihrem eigenen Browser. GHOST zeigen die gängigen Wallets noch nicht an; dafür ist die Seite „Wallet“ da.",
+          "On a computer, Kastle or KasWare as a browser extension. It does not work on a phone yet: mobile browsers have no wallet extensions, and the Kastle and KasWare apps do not open K.Lend in their own browser yet. Common wallets don't display GHOST yet; that's what the “Wallet” page is for.",
         )
       : tr(
       "Zum Handeln keine: Aktionen laufen mit einer Schlüsseldatei in keys/, die du unter „Wallet“ anlegst und mit KAS aus deiner Wallet auflädst. KasWare oder Kastle kannst du zusätzlich verbinden. Die Seite liest davon nur Adresse, Netzwerk, Guthaben und öffentlichen Schlüssel und fordert nie eine Signatur an. GHOST zeigen die gängigen Wallets nicht an. Dafür ist die Seite „Wallet“ da: Guthaben, Senden und Empfangen von KAS und GHOST.",

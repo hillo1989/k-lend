@@ -17,6 +17,9 @@ export function NoWallet({ small = false }: { small?: boolean }) {
   const url = "https://k-lend.com";
 
   if (platform !== null) {
+    // Stand 06.10.2026, mit dem Betreiber am Handy geprüft: Kastles „Explore“ ist
+    // eine feste Liste geprüfter Apps, KasWare 0.5.3 (Android) hat keinen frei
+    // nutzbaren Browser. Am Handy gibt es daher noch keinen Weg zur Wallet.
     const copy = async () => {
       try {
         await navigator.clipboard.writeText(url);
@@ -29,45 +32,21 @@ export function NoWallet({ small = false }: { small?: boolean }) {
       <>
         <p className={cls}>
           {tr(
-            "Auf dem Handy gibt es keine Browser-Erweiterungen; K.Lend muss im Browser einer Wallet-App laufen.",
-            "Phones have no browser extensions; K.Lend has to run inside a wallet app's browser.",
+            "Am Handy lässt sich K.Lend noch nicht mit einer Wallet verbinden: Handy-Browser kennen keine Wallet-Erweiterungen, und die Wallet-Apps (Kastle, KasWare) öffnen K.Lend noch nicht in ihrem eigenen Browser.",
+            "K.Lend cannot connect to a wallet on a phone yet: mobile browsers have no wallet extensions, and the wallet apps (Kastle, KasWare) do not open K.Lend in their own browser yet.",
           )}
         </p>
-        <ul className={cls}>
-          {platform === "android" && (
-            <li>
-              {tr(
-                "KasWare (Android-App): im eingebauten Browser der App k-lend.com öffnen (Link unten kopieren).",
-                "KasWare (Android app): open k-lend.com in the app's built-in browser (copy the link below).",
-              )}
-            </li>
+        <p className={cls}>
+          {tr(
+            "Ansehen geht hier – zum Handeln bitte am Rechner mit der Browser-Erweiterung von KasWare oder Kastle (Chrome, Brave oder Edge).",
+            "You can look around here – to act, please use a computer with the KasWare or Kastle browser extension (Chrome, Brave or Edge).",
           )}
-          <li>
-            {tr(
-              "Kastle: zeigt unter „Explore“ nur geprüfte Apps. K.Lend ist dort noch nicht aufgenommen – bis dahin am Rechner mit der Browser-Erweiterung arbeiten.",
-              "Kastle: “Explore” only lists verified apps. K.Lend is not listed there yet – until then, use the browser extension on a computer.",
-            )}
-          </li>
-        </ul>
+        </p>
         <div className="btn-row">
           <button type="button" className="btn btn-primary btn-sm" onClick={() => void copy()}>
-            {copied ? tr("Kopiert ✓", "Copied ✓") : tr("Link kopieren", "Copy link")}
+            {copied ? tr("Kopiert ✓", "Copied ✓") : tr("Link für den Rechner kopieren", "Copy link for your computer")}
           </button>
         </div>
-        <p className="muted small">
-          {tr("Noch keine Wallet-App? ", "No wallet app yet? ")}
-          <a href={WALLET_LINKS.kastle} target="_blank" rel="noopener noreferrer">
-            Kastle
-          </a>
-          {platform === "android" && (
-            <>
-              {" · "}
-              <a href={WALLET_LINKS.kasware} target="_blank" rel="noopener noreferrer">
-                KasWare
-              </a>
-            </>
-          )}
-        </p>
       </>
     );
   }
