@@ -1,6 +1,8 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { ActionForms } from "../components/ActionForms";
 import { AccountCard } from "../components/AccountCard";
+import { WalletPanel } from "../components/WalletPanel";
+import { useWallet } from "../wallet/WalletContext";
 import { CopyButton } from "../components/CopyCode";
 import { StatusNotices } from "../components/Network";
 import { StandingOrders } from "../components/StandingOrders";
@@ -46,8 +48,12 @@ const when = (t: number) => new Date(t).toLocaleString(locale(), { dateStyle: "s
 export function Wallet() {
   const { network, status } = useStatus();
   const acc = useAccount();
-  const key = acc.selected;
-  const log = useTxLog(network, key?.file ?? null);
+  const w = useWallet();
+  // Öffentliche Seite: keine Schlüsseldateien des Servers, sondern die Browser-Wallet
+  const pub = acc.publicMode;
+  const key = pub ? null : acc.selected;
+  const address = pub ? (w.status === "connected" ? w.address : null) : (key?.address ?? null);
+  const log = useTxLog(network, pub ? (address ? `wallet:${address}` : null) : (key?.file ?? null));
   const usd = useUsd();
   const deployed = Boolean(status?.deployed);
 
@@ -88,7 +94,12 @@ export function Wallet() {
       </div>
       <StatusNotices />
       <p className="lead">
-        {tr(
+        {pub
+          ? tr(
+              `Deine Wallet (Kastle oder KasWare) bleibt deine Wallet: Die Schlüssel liegen nur dort, K.Lend sieht sie nie. KAS und ${STABLE_SYMBOL} gehören zur selben Adresse. Gängige Wallets zeigen ${STABLE_SYMBOL} noch nicht an, weil es ein Covenant-Token ist. Hier siehst du beides und kannst senden; jede Sendung bestätigst du in deiner Wallet.`,
+              `Your wallet (Kastle or KasWare) stays your wallet: the keys stay there, K.Lend never sees them. KAS and ${STABLE_SYMBOL} belong to the same address. Common wallets do not show ${STABLE_SYMBOL} yet because it is a covenant token. Here you see both and can send; you confirm every transfer in your wallet.`,
+            )
+          : tr(
           `Deine Schlüsseldatei ist deine Wallet. KAS und ${STABLE_SYMBOL} gehören zur selben Adresse. Gängige Wallets zeigen ${STABLE_SYMBOL} noch nicht an, weil es ein Covenant-Token ist. Hier siehst du beides, kannst senden und empfangen.`,
           `Your key file is your wallet. KAS and ${STABLE_SYMBOL} belong to the same address. Common wallets do not show ${STABLE_SYMBOL} yet because it is a covenant token. Here you see both and can send and receive.`,
         )}
@@ -123,27 +134,29 @@ export function Wallet() {
       </nav>
 
       <div className="stack section-sm">
-        <AccountCard />
+        {pub ? <WalletPanel /> : <AccountCard />}
 
         <section className="card" aria-labelledby="empfangen-title">
           <div className="card-head">
             <h2 id="empfangen-title">{tr("Empfangen", "Receive")}</h2>
           </div>
-          {key ? (
+          {address ? (
             <>
               <div className="receive">
-                <QrCode text={key.address} label={tr(`QR-Code der Adresse ${key.address}`, `QR code of address ${key.address}`)} />
+                <QrCode text={address} label={tr(`QR-Code der Adresse ${address}`, `QR code of address ${address}`)} />
                 <div className="receive-text">
                   <p className="small muted">{tr(`Für KAS und ${STABLE_SYMBOL}:`, `For KAS and ${STABLE_SYMBOL}:`)}</p>
-                  <code className="addr-big">{key.address}</code>
+                  <code className="addr-big">{address}</code>
                   <div className="btn-row tight">
-                    <CopyButton text={key.address} label={tr("Adresse", "Address")} />
-                    <a className="btn btn-ghost btn-sm" href={explorerAddress(network, key.address)} target="_blank" rel="noreferrer noopener">
+                    <CopyButton text={address} label={tr("Adresse", "Address")} />
+                    <a className="btn btn-ghost btn-sm" href={explorerAddress(network, address)} target="_blank" rel="noreferrer noopener">
                       {tr("Im Explorer", "In explorer")}
                     </a>
                   </div>
                 </div>
               </div>
+              {key && (
+                <>
               <p className="small">
                 {tr(
                   `KAS erscheinen von selbst. ${STABLE_SYMBOL} liegen in eigenen Token-UTXOs, die der Explorer unter deiner Adresse nicht zeigt. Kam die Sendung von einem anderen Rechner, trag den Betrag ein, den dir der Absender nennt. Die Seite sucht dann genau diesen Token.`,
@@ -192,18 +205,25 @@ export function Wallet() {
                 {recv && !recv.ok && <Callout kind="danger" title={recv.nodeDown ? tr("Nodes nicht erreichbar", "Nodes unreachable") : tr("Fehler", "Error")}>{recv.error}</Callout>}
                 {recvErr && <Callout kind="danger" title={tr("Fehler", "Error")}>{recvErr}</Callout>}
               </div>
+                </>
+              )}
             </>
           ) : (
-            <p className="muted small">{tr("Links eine Schlüsseldatei wählen oder anlegen.", "Choose or create a key file on the left.")}</p>
+            <p className="muted small">
+              {pub
+                ? tr("Erst die Wallet verbinden, dann steht hier deine Adresse.", "Connect your wallet first, then your address appears here.")
+                : tr("Links eine Schlüsseldatei wählen oder anlegen.", "Choose or create a key file on the left.")}
+            </p>
           )}
         </section>
       </div>
 
       <ActionForms prefill={null} actions={["transfer", "send"]} title={tr("Senden", "Send")} id="senden" />
 
-      <StandingOrders />
+      {/* Daueraufträge und Nachrichten nutzen Schlüsseldateien des Servers – öffentlich gesperrt */}
+      {!pub && <StandingOrders />}
 
-      <IncomingMessages />
+      {!pub && <IncomingMessages />}
 
       <section className="card section-sm" aria-labelledby="verlauf-title">
         <div className="card-head">

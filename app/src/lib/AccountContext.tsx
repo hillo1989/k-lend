@@ -34,6 +34,8 @@ export interface AccountState {
   refresh(): void;
   /** Schlüssel, deren Name zum Netz passt, zuerst */
   isNetworkKey(file: string): boolean;
+  /** Öffentliche Seite (k-lend.com): keine Schlüsseldateien, nur Browser-Wallet */
+  publicMode: boolean;
 }
 
 const Ctx = createContext<AccountState | null>(null);
@@ -44,6 +46,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const [loadedFor, setLoadedFor] = useState<NetworkId | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [publicMode, setPublicMode] = useState(false);
   const [tick, setTick] = useState(0);
   const [selFile, setSelFile] = useState<string | null>(() => recall(network));
 
@@ -64,7 +67,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     if (shownFor.current !== network) setLoading(true);
     fetchKeys(network, ctl.signal)
       .then((l) => {
-        setList(l);
+        setList(l.keys);
+        setPublicMode(l.public);
         setLoadedFor(network);
         shownFor.current = network;
         setError(null);
@@ -104,8 +108,9 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         setTick((x) => x + 1);
       },
       isNetworkKey,
+      publicMode,
     };
-  }, [list, loadedFor, network, selFile, loading, error, isNetworkKey]);
+  }, [list, loadedFor, network, selFile, loading, error, isNetworkKey, publicMode]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

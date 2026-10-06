@@ -18,8 +18,7 @@ export function WalletPanel() {
   return (
     <section className="card wallet-panel" aria-labelledby="wallet-title">
       <div className="card-head">
-        <h2 id="wallet-title">{tr("Browser-Wallet (optional)", "Browser wallet (optional)")}</h2>
-        <span className="tag">{tr("Wallet nur lesend", "wallet read-only")}</span>
+        <h2 id="wallet-title">{tr("Deine Wallet", "Your wallet")}</h2>
       </div>
 
       {w.error && (
@@ -77,8 +76,8 @@ export function WalletPanel() {
           </div>
           <p className="muted small">
             {tr(
-              "Die Seite liest nur Adresse, Netzwerk, Guthaben und öffentlichen Schlüssel. Sie fordert keine Signatur an und sendet keine Transaktion.",
-              "The page only reads address, network, balance and public key. It never requests a signature and sends no transaction.",
+              "Die Seite liest Adresse, Netzwerk, Guthaben und öffentlichen Schlüssel. Jede Transaktion musst du in deiner Wallet einzeln bestätigen; die Schlüssel verlassen die Wallet nie.",
+              "The page reads address, network, balance and public key. You confirm every transaction in your wallet; the keys never leave it.",
             )}
           </p>
         </>
@@ -105,8 +104,8 @@ export function WalletPanel() {
           </div>
           <p className="muted small">
             {tr(
-              "Die Wallet fragt nach einer Freigabe. Von der Wallet wird nie eine Signatur angefordert. Aktionen laufen über das Konto (Schlüsseldatei) oben.",
-              "The wallet asks for approval. No signature is ever requested from the wallet. Actions run through the account (key file) above.",
+              "Die Wallet fragt zuerst nach einer Freigabe der Verbindung. Signaturen fordert die Seite erst an, wenn du eine Aktion ausführst.",
+              "The wallet first asks you to approve the connection. The page only requests signatures when you run an action.",
             )}
           </p>
         </>

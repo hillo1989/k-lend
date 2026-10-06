@@ -78,11 +78,11 @@ async function parse(res: Response): Promise<Record<string, unknown>> {
   }
 }
 
-export async function fetchKeys(network: NetworkId, signal?: AbortSignal): Promise<KeyListEntry[]> {
+export async function fetchKeys(network: NetworkId, signal?: AbortSignal): Promise<{ keys: KeyListEntry[]; public: boolean }> {
   const res = await fetch(`./api/keys?network=${encodeURIComponent(network)}`, { signal, cache: "no-store" });
   const j = await parse(res);
   if (!res.ok || j.ok === false) throw new ApiError(String(j.error ?? tr(`Fehler ${res.status}`, `Error ${res.status}`)), res.status, j.nodeDown === true);
-  return (j.keys as KeyListEntry[]) ?? [];
+  return { keys: (j.keys as KeyListEntry[]) ?? [], public: j.public === true };
 }
 
 async function post(path: string, body: unknown): Promise<Record<string, unknown>> {
