@@ -341,7 +341,8 @@ export function ActionForms({
     }
   };
 
-  const vaults = (live?.vaults ?? []).filter((x) => !ownVaults || (key !== null && x.owner === key.xonly));
+  // Rücknahme an eigenen Vaults ergibt keinen Sinn (1 % Gebühr an sich selbst; dafür gibt es „Tilgen“)
+  const vaults = (live?.vaults ?? []).filter((x) => (!ownVaults || (key !== null && x.owner === key.xonly)) && !(action === "redeem" && key !== null && x.owner === key.xonly));
   const selectedVault = vault !== null ? (vaults.find((x) => x.index === vault) ?? null) : null;
   const staleVault = meta.vault && vault !== null ? (vaults.find((x) => x.index === vault)?.stale ?? false) : false;
   const blocked = staleVault || nodeDown || unclearLock;
