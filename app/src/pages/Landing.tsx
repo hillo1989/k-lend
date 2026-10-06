@@ -3,6 +3,7 @@ import { BlockDag } from "../components/BlockDag";
 import { Stat } from "../components/ui";
 import { tr } from "../lib/i18n";
 import { useStatus } from "../lib/StatusContext";
+import { usePublicMode } from "../lib/AccountContext";
 import { de } from "../lib/status";
 import { pct } from "../lib/demo";
 import { href } from "../router";
@@ -44,6 +45,7 @@ const facts = () => [
 
 export function Landing() {
   const { status, network } = useStatus();
+  const pub = usePublicMode();
   const live = status?.deployed ? status : null;
   const dash = "–";
   return (
@@ -130,8 +132,13 @@ export function Landing() {
         <h2 id="schritte">{tr("In drei Schritten", "In three steps")}</h2>
         <ol className="steps">
           <li>
-            <strong>{tr("Konto anlegen.", "Create an account.")}</strong>{" "}
-            {tr(
+            <strong>{pub ? tr("Wallet verbinden.", "Connect a wallet.") : tr("Konto anlegen.", "Create an account.")}</strong>{" "}
+            {pub
+              ? tr(
+                  `Oben rechts „Wallet verbinden“: Kastle oder KasWare mit etwas ${NATIVE}. Deine Schlüssel bleiben in der Wallet, jede Aktion bestätigst du dort.`,
+                  `Top right “Connect wallet”: Kastle or KasWare with some ${NATIVE}. Your keys stay in the wallet, you confirm every action there.`,
+                )
+              : tr(
               `Unter „Wallet“ eine Schlüsseldatei anlegen oder wählen und die Adresse mit ${NATIVE} aufladen. Die Datei liegt nur auf deinem Rechner.`,
               `Under “Wallet”, create or choose a key file and fund the address with ${NATIVE}. The file stays only on your computer.`,
             )}

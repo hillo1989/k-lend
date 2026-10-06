@@ -1,11 +1,17 @@
 import { NATIVE, PROTOCOL_NAME, STABLE_SYMBOL } from "../config";
 import { tr } from "../lib/i18n";
+import { usePublicMode } from "../lib/AccountContext";
 import { href } from "../router";
 
-const QA = (): { q: string; a: string }[] => [
+const QA = (pub: boolean): { q: string; a: string }[] => [
   {
     q: tr("Kann ich über die Seite einzahlen und prägen?", "Can I deposit and mint via the site?"),
-    a: tr(
+    a: pub
+      ? tr(
+          `Ja, mit deiner Browser-Wallet (Kastle oder KasWare). Die Seite baut die Transaktion, deine Wallet zeigt sie dir und signiert sie; die Schlüssel verlassen die Wallet nie, K.Lend speichert keine. Vor dem Senden prüft der Server die signierte Transaktion noch einmal vollständig. Die Verträge sind experimentell und nicht professionell geprüft (nur KI-Audits). Setze nur Beträge ein, die du verlieren kannst.`,
+          `Yes, with your browser wallet (Kastle or KasWare). The site builds the transaction, your wallet shows it to you and signs it; the keys never leave the wallet, K.Lend stores none. Before sending, the server checks the signed transaction once more in full. The contracts are experimental and not professionally audited (AI audits only). Only use amounts you can afford to lose.`,
+        )
+      : tr(
       `Ja, wenn die Seite lokal auf deinem Rechner läuft. Deine Browser-Wallet bleibt dabei nur lesend. Die Aktionen führt der lokale Server über ghostctl aus, und zwar mit einer Schlüsseldatei aus keys/ auf diesem Rechner. Vor jedem Senden steht eine Prüfung (Probelauf). Die Verträge sind experimentell und nicht professionell geprüft (nur ein KI-Audit, siehe AUDIT.md). Setze nur Beträge ein, die du verlieren kannst.`,
       `Yes, if the site runs locally on your machine. Your browser wallet stays read-only throughout. The actions are carried out by the local server via ghostctl, using a key file from keys/ on this machine. Every send is preceded by a check (dry run). The contracts are experimental and not professionally audited (only an AI audit, see AUDIT.md). Only use amounts you can afford to lose.`,
     ),
@@ -96,14 +102,24 @@ const QA = (): { q: string; a: string }[] => [
   },
   {
     q: tr("Welche Wallet brauche ich?", "Which wallet do I need?"),
-    a: tr(
+    a: pub
+      ? tr(
+          "Kastle (Browser-Erweiterung, Android- und iPhone-App) oder KasWare (Browser-Erweiterung, Android-App). Am Handy öffnest du K.Lend im Browser der Wallet-App. GHOST zeigen die gängigen Wallets noch nicht an; dafür ist die Seite „Wallet“ da.",
+          "Kastle (browser extension, Android and iPhone app) or KasWare (browser extension, Android app). On a phone, open K.Lend in the wallet app's browser. Common wallets don't display GHOST yet; that's what the “Wallet” page is for.",
+        )
+      : tr(
       "Zum Handeln keine: Aktionen laufen mit einer Schlüsseldatei in keys/, die du unter „Wallet“ anlegst und mit KAS aus deiner Wallet auflädst. KasWare oder Kastle kannst du zusätzlich verbinden. Die Seite liest davon nur Adresse, Netzwerk, Guthaben und öffentlichen Schlüssel und fordert nie eine Signatur an. GHOST zeigen die gängigen Wallets nicht an. Dafür ist die Seite „Wallet“ da: Guthaben, Senden und Empfangen von KAS und GHOST.",
       "None for acting: actions run with a key file in keys/, which you create under “Wallet” and fund with KAS from your wallet. You can additionally connect KasWare or Kastle. The site only reads their address, network, balance and public key, and never requests a signature. Common wallets don't display GHOST. That's what the “Wallet” page is for: balances, sending and receiving KAS and GHOST.",
     ),
   },
   {
     q: tr(`Wie empfange ich ${STABLE_SYMBOL}?`, `How do I receive ${STABLE_SYMBOL}?`),
-    a: tr(
+    a: pub
+      ? tr(
+          `Unter „Wallet“ steht die Adresse deiner verbundenen Wallet, auch als QR-Code. An dieselbe Adresse gehen ${NATIVE} und ${STABLE_SYMBOL}. ${STABLE_SYMBOL}, die über K.Lend an dich gesendet werden, erscheinen dort sofort.`,
+          `Under “Wallet” you'll find the address of your connected wallet, also as a QR code. ${NATIVE} and ${STABLE_SYMBOL} both go to that address. ${STABLE_SYMBOL} sent to you via K.Lend shows up there immediately.`,
+        )
+      : tr(
       `Unter „Wallet“ steht deine Adresse, auch als QR-Code. An dieselbe Adresse gehen ${NATIVE} und ${STABLE_SYMBOL}. ${NATIVE} erscheinen von selbst. ${STABLE_SYMBOL} liegen in eigenen Token-UTXOs, deren Adresse vom Betrag abhängt. Kommt eine Sendung von einem anderen Rechner, trägst du unter „Wallet“ den Betrag ein, den dir der Absender nennt, und die Seite sucht genau diesen Token. Was du von dieser Seite aus an eigene Schlüsseldateien schickst, erscheint sofort.`,
       `Under “Wallet” you'll find your address, also as a QR code. ${NATIVE} and ${STABLE_SYMBOL} both go to the same address. ${NATIVE} shows up automatically. ${STABLE_SYMBOL} sits in its own token UTXOs, whose address depends on the amount. If a transfer comes from another machine, you enter the amount the sender gives you under “Wallet”, and the site looks for exactly that token. Whatever you send to your own key files from this site appears immediately.`,
     ),
@@ -153,13 +169,14 @@ const QA = (): { q: string; a: string }[] => [
 ];
 
 export function Faq() {
+  const pub = usePublicMode();
   return (
     <div className="container section prose">
       <h1 tabIndex={-1} data-route-heading>
         {tr("Häufige Fragen", "Frequently asked questions")}
       </h1>
       <div className="faq">
-        {QA().map((x) => (
+        {QA(pub).map((x) => (
           <details key={x.q}>
             <summary>{x.q}</summary>
             <p>{x.a}</p>

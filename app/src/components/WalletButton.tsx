@@ -14,7 +14,7 @@ import { Usd } from "./Usd";
 /**
  * Kopfzeile oben rechts: „Wallet verbinden“ bzw. im verbundenen Zustand das
  * KAS-Guthaben der Browser-Wallet. Nur lesend – die Seite fordert von der
- * Wallet nie eine Signatur an (Aktionen laufen über die Schlüsseldatei).
+ * Wallet erst eine Signatur an, wenn eine Aktion ausgeführt wird.
  */
 export function WalletButton() {
   const w = useWallet();
@@ -164,8 +164,8 @@ export function WalletButton() {
               </div>
               <p className="muted small">
                 {tr(
-                  "Nur lesend: Die Seite fordert von der Wallet nie eine Signatur an. GHOST zeigt die Wallet selbst nicht an; der Bestand hier stammt aus den GHOST-UTXOs, die ghostctl für diese Adresse kennt.",
-                  "Read-only: the page never requests a signature from the wallet. The wallet itself does not show GHOST; the balance here comes from the GHOST UTXOs ghostctl knows for this address.",
+                  "Jede Aktion bestätigst du einzeln in deiner Wallet; die Schlüssel verlassen sie nie. GHOST zeigt die Wallet selbst nicht an; der Bestand hier stammt aus den GHOST-Token, die K.Lend für diese Adresse kennt.",
+                  "You confirm every action in your wallet; the keys never leave it. The wallet itself does not show GHOST; the balance here comes from the GHOST tokens K.Lend knows for this address.",
                 )}
               </p>
             </>

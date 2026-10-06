@@ -120,3 +120,8 @@ export function useAccount(): AccountState {
   if (!v) throw new Error("useAccount außerhalb von AccountProvider");
   return v;
 }
+
+/** Öffentliche Seite? Ohne Provider (z. B. in Tests) false */
+export function usePublicMode(): boolean {
+  return useContext(Ctx)?.publicMode ?? false;
+}

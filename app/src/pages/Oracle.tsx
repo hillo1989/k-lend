@@ -5,10 +5,12 @@ import { Callout } from "../components/ui";
 import { NATIVE, NETWORKS, STABLE_SYMBOL } from "../config";
 import { useStatus } from "../lib/StatusContext";
 import { tr } from "../lib/i18n";
+import { usePublicMode } from "../lib/AccountContext";
 
 /** Alles zum Preis-Orakel: Stand, Funktionsweise, Kontrolle, Dauerbetrieb, Update von Hand */
 export function Oracle() {
   const { network } = useStatus();
+  const pub = usePublicMode();
   return (
     <div className="container section">
       <div className="section-head">
@@ -109,6 +111,7 @@ export function Oracle() {
             )}
           </p>
         </section>
+        {!pub && (
         <section className="card" aria-labelledby="oracle-agent">
           <div className="card-head">
             <h2 id="oracle-agent">{tr("Dauerbetrieb: GHOST-Agent", "Continuous operation: GHOST agent")}</h2>
@@ -128,8 +131,11 @@ export function Oracle() {
             )}
           </p>
         </section>
+        )}
       </div>
 
+      {!pub && (
+        <>
       <Callout kind="info" title={tr("Update von Hand", "Manual update")}>
         {tr(
           "Nur mit der Schlüsseldatei der Unterzeichner möglich. Zwischen zwei Updates müssen mindestens 600 DAA liegen (etwa 1 Minute).",
@@ -137,6 +143,8 @@ export function Oracle() {
         )}
       </Callout>
       <ActionForms prefill={null} actions={["oracle-update"]} title={tr("Orakel aktualisieren", "Update oracle")} id="orakel-update" />
+        </>
+      )}
     </div>
   );
 }
