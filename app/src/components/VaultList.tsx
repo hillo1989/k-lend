@@ -30,7 +30,8 @@ export function VaultList({ onAction }: { onAction(action: CliAction, vault: num
   const acc = useAccount();
   const w = useWallet();
   const walletKey = xOnlyKey(w.publicKey);
-  const myKey = acc.selected?.xonly.toLowerCase() ?? null;
+  // öffentliche Seite: eigene Vaults = die der verbundenen Wallet (keine Schlüsseldateien)
+  const myKey = acc.publicMode ? (walletKey?.toLowerCase() ?? null) : (acc.selected?.xonly.toLowerCase() ?? null);
   if (!status?.deployed) return null;
   const vaults = [...status.vaults].sort(
     (a, b) => Number(b.owner.toLowerCase() === myKey) - Number(a.owner.toLowerCase() === myKey) || a.index - b.index,
@@ -43,13 +44,22 @@ export function VaultList({ onAction }: { onAction(action: CliAction, vault: num
         <span className="tag">live · {vaults.length}</span>
       </div>
       <p className="muted small">
-        {tr("Quelle ist ", "Source is ")}
-        <code>ghostctl status</code>
-        {tr(", also die Zustandsdatei dieses Rechners (", ", i.e. this computer's state file (")}
-        <code>deployments/{network}.json</code>
-        {tr(
-          "). Vaults anderer Rechner fehlen. Deine Vaults, die zum gewählten Schlüssel gehören, stehen oben und sind hervorgehoben.",
-          "). Vaults of other computers are missing. Your vaults belonging to the selected key are listed first and highlighted.",
+        {acc.publicMode ? (
+          tr(
+            "Alle Vaults, die K.Lend kennt (Stand der Kette, nachgeführt vom Server). Die Vaults deiner verbundenen Wallet stehen oben und sind hervorgehoben.",
+            "All vaults K.Lend knows (chain state, tracked by the server). The vaults of your connected wallet are listed first and highlighted.",
+          )
+        ) : (
+          <>
+            {tr("Quelle ist ", "Source is ")}
+            <code>ghostctl status</code>
+            {tr(", also die Zustandsdatei dieses Rechners (", ", i.e. this computer's state file (")}
+            <code>deployments/{network}.json</code>
+            {tr(
+              "). Vaults anderer Rechner fehlen. Deine Vaults, die zum gewählten Schlüssel gehören, stehen oben und sind hervorgehoben.",
+              "). Vaults of other computers are missing. Your vaults belonging to the selected key are listed first and highlighted.",
+            )}
+          </>
         )}
       </p>
       {vaults.length === 0 ? (
