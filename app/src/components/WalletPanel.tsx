@@ -1,4 +1,5 @@
-import { NETWORKS, WALLET_LINKS } from "../config";
+import { NETWORKS } from "../config";
+import { NoWallet } from "./NoWallet";
 import { useStatus } from "../lib/StatusContext";
 import { shortHex, xOnlyKey } from "../lib/status";
 import { fmtKas, shortAddress } from "../lib/format";
@@ -83,26 +84,7 @@ export function WalletPanel() {
         </>
       ) : w.installed.length === 0 ? (
         <div className="no-wallet">
-          <p>
-            {tr(
-              "Keine Kaspa-Wallet im Browser gefunden. Für die Verbindung brauchst du eine Browser-Erweiterung, zum Beispiel:",
-              "No Kaspa wallet found in the browser. To connect you need a browser extension, for example:",
-            )}
-          </p>
-          <ul>
-            <li>
-              <a href={WALLET_LINKS.kasware} target="_blank" rel="noopener noreferrer">
-                KasWare Wallet
-              </a>{" "}
-              ({tr("offizielle Seite", "official site")})
-            </li>
-            <li>
-              <a href={WALLET_LINKS.kastle} target="_blank" rel="noopener noreferrer">
-                Kastle Wallet
-              </a>{" "}
-              ({tr("offizielle Seite", "official site")})
-            </li>
-          </ul>
+          <NoWallet />
           <p className="muted small">{tr("Die Live-Daten und den Rechner siehst du auch ohne Wallet.", "You can see live data and the calculator without a wallet too.")}</p>
         </div>
       ) : (

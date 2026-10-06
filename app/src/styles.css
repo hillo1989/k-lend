@@ -2056,3 +2056,16 @@ fieldset.plain:disabled {
 .install-hint-row > span {
   flex: 1 1 auto;
 }
+
+/* Wallet-Menü am Handy: an den Bildschirmrand statt an den Knopf, sonst ragt es links hinaus */
+@media (max-width: 720px) {
+  .wallet-pop {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    top: 64px;
+    width: auto;
+    max-height: calc(100vh - 80px);
+    overflow-y: auto;
+  }
+}

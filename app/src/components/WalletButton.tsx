@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { NETWORKS, WALLET_LINKS } from "../config";
+import { NETWORKS } from "../config";
+import { NoWallet } from "./NoWallet";
 import { fmtKas, fmtStable, shortAddress } from "../lib/format";
 import { xOnlyKey } from "../lib/status";
 import { tr } from "../lib/i18n";
@@ -169,27 +170,7 @@ export function WalletButton() {
               </p>
             </>
           ) : w.installed.length === 0 ? (
-            <>
-              <p className="small">
-                {tr(
-                  "Keine Kaspa-Wallet im Browser gefunden. Du brauchst eine Browser-Erweiterung, zum Beispiel:",
-                  "No Kaspa wallet found in the browser. You need a browser extension, for example:",
-                )}
-              </p>
-              <ul className="small">
-                <li>
-                  <a href={WALLET_LINKS.kasware} target="_blank" rel="noopener noreferrer">
-                    KasWare Wallet
-                  </a>
-                </li>
-                <li>
-                  <a href={WALLET_LINKS.kastle} target="_blank" rel="noopener noreferrer">
-                    Kastle Wallet
-                  </a>
-                </li>
-              </ul>
-              <p className="muted small">{tr("Nach der Installation die Seite neu laden.", "Reload the page after installing.")}</p>
-            </>
+            <NoWallet small />
           ) : (
             <>
               <p className="small">{tr("Welche Wallet?", "Which wallet?")}</p>
