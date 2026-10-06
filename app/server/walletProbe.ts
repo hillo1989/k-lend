@@ -12,6 +12,7 @@
 // mit confirmMainnet === true (gesetzt allein vom Knopf „Jetzt senden“), und
 // nie für die Trockenprobe (ghostctl lehnt das selbst noch einmal ab).
 import { checkAmount, isNetwork, ValidationError, type Network } from "./actions.ts";
+import { ADDRESS_VERSIONS, decodeKaspaAddress } from "./kaspaAddress.ts";
 
 export const PROBE_STAGES = ["dry-cancel", "tresor-open", "tresor-cancel"] as const;
 export type ProbeStage = (typeof PROBE_STAGES)[number];
@@ -61,6 +62,10 @@ export function checkProbeAddress(v: unknown, network: Network): string {
   if (!m) throw new ValidationError("Adresse: Schnorr-Adresse kaspa:q… (bzw. kaspatest:q…) erwartet.");
   const want = network === "mainnet" ? "kaspa" : "kaspatest";
   if (m[1] !== want) throw new ValidationError(`Adresse passt nicht zum Netz ${network}.`);
+  // Prüfsumme und Version (A20c-1): sonst startet ghostctl und verbindet sich
+  // erst mit dem Node, bevor es die Adresse ablehnt (11–13 s je Aufruf)
+  const d = decodeKaspaAddress(s);
+  if (!d || d.version !== ADDRESS_VERSIONS.pubkey) throw new ValidationError("Adresse: Prüfsumme stimmt nicht – bitte die Adresse aus der Wallet kopieren (Tippfehler?).");
   return s;
 }
 

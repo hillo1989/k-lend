@@ -587,6 +587,307 @@ pub fn standing_order(p: &TresorParams, s: &TresorState) -> Artifact {
     )
 }
 
+// =============================================================== Version 5 ----
+//
+// Verträge nach Audit 20 (docs/v5-entwurf.md). Noch ohne Anbindung an
+// ghostctl; Bau der Transaktionen für Tests in crate::v5.
+
+pub const ORACLE_V5_SRC: &str = include_str!("../../contracts/price_oracle_v5.sil");
+pub const REGISTER_V5_SRC: &str = include_str!("../../contracts/signer_register_v5.sil");
+pub const VAULT_V5_SRC: &str = include_str!("../../contracts/stable_vault_v5.sil");
+pub const POOL_V5_SRC: &str = include_str!("../../contracts/ghost_pool_v5.sil");
+
+pub const TAG_LOCK: u8 = 0x05;
+/// Höchstzahl der Wächter (signer_register_v5.sil MAX_GUARDS)
+pub const MAX_GUARDS: i64 = 3;
+
+/// Feste Parameter des Preis-Orakels v5
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OracleV5Params {
+    pub reg_cov: Hash,
+    pub max_rate: i64,
+    pub rate_step: i64,
+    pub rate_gap_daa: i64,
+    pub freeze_after_daa: i64,
+    /// größter Sprung je Update in bps (×(1 + j) bzw. ÷(1 + j)); 10 000 = v4
+    pub jump_bps: i64,
+    /// Updates, bis ein Preis Referenzpreis wird
+    pub ref_after: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OracleV5State {
+    pub kas_usd: i64,
+    pub oracle_daa: i64,
+    pub seq: i64,
+    pub stable_rate: i64,
+    pub stable_index: i64,
+    pub frozen: bool,
+    pub last_rate_daa: i64,
+    /// Referenzpreis (mindestens ref_after Updates öffentlich)
+    pub ref_kas_usd: i64,
+    /// Kandidat für den nächsten Referenzpreis und seine seq
+    pub cand_kas_usd: i64,
+    pub cand_seq: i64,
+}
+
+impl OracleV5State {
+    /// Genesis: Referenz und Kandidat = Startpreis
+    pub fn genesis(kas_usd: i64, daa: i64, rate: i64) -> Self {
+        Self {
+            kas_usd,
+            oracle_daa: daa,
+            seq: 0,
+            stable_rate: rate,
+            stable_index: 1_000_000_000,
+            frozen: false,
+            last_rate_daa: daa,
+            ref_kas_usd: kas_usd,
+            cand_kas_usd: kas_usd,
+            cand_seq: 0,
+        }
+    }
+}
+
+pub fn oracle_v5(p: &OracleV5Params, s: &OracleV5State) -> Artifact {
+    compile(
+        ORACLE_V5_SRC,
+        vec![
+            hash_bytes(&p.reg_cov),
+            ArtifactValue::Int(p.max_rate),
+            ArtifactValue::Int(p.rate_step),
+            ArtifactValue::Int(p.rate_gap_daa),
+            ArtifactValue::Int(p.freeze_after_daa),
+            ArtifactValue::Int(p.jump_bps),
+            ArtifactValue::Int(p.ref_after),
+            ArtifactValue::Int(s.kas_usd),
+            ArtifactValue::Int(s.oracle_daa),
+            ArtifactValue::Int(s.seq),
+            ArtifactValue::Int(s.stable_rate),
+            ArtifactValue::Int(s.stable_index),
+            ArtifactValue::Bool(s.frozen),
+            ArtifactValue::Int(s.last_rate_daa),
+            ArtifactValue::Int(s.ref_kas_usd),
+            ArtifactValue::Int(s.cand_kas_usd),
+            ArtifactValue::Int(s.cand_seq),
+        ],
+    )
+}
+
+/// Sprunggrenze wie price_oracle_v5.sil update()
+pub fn jump_ok(cur: i64, new: i64, jump_bps: i64) -> bool {
+    let (c, n, j) = (cur as i128, new as i128, jump_bps as i128);
+    n * 10_000 <= c * (10_000 + j) && n * (10_000 + j) >= c * 10_000
+}
+
+/// Folgezustand eines Preis-Updates genau wie price_oracle_v5.sil update()
+/// (None bei Überlauf des Index)
+pub fn oracle_v5_next_state(p: &OracleV5Params, prev: &OracleV5State, kas_usd: i64, daa: i64, rate: i64) -> Option<OracleV5State> {
+    let delta = daa - prev.oracle_daa;
+    let growth = prev.stable_rate.checked_mul(delta)? / 1_000_000_000;
+    let index = prev.stable_index.checked_add(prev.stable_index.checked_mul(growth)? / 1_000_000_000)?;
+    let seq = prev.seq + 1;
+    let rotate = seq - prev.cand_seq >= p.ref_after;
+    Some(OracleV5State {
+        kas_usd,
+        oracle_daa: daa,
+        seq,
+        stable_rate: rate,
+        stable_index: index,
+        frozen: false,
+        last_rate_daa: if rate != prev.stable_rate { daa } else { prev.last_rate_daa },
+        ref_kas_usd: if rotate { prev.cand_kas_usd } else { prev.ref_kas_usd },
+        cand_kas_usd: if rotate { kas_usd } else { prev.cand_kas_usd },
+        cand_seq: if rotate { seq } else { prev.cand_seq },
+    })
+}
+
+/// Feste Parameter des Registers v5
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegisterV5Params {
+    #[serde(with = "hex_bytes")]
+    pub deployer: Vec<u8>,
+    pub min_signers: i64,
+    pub min_threshold: i64,
+    pub rot_delay_daa: i64,
+    pub emerg_after_daa: i64,
+    pub emerg_delay_daa: i64,
+    /// Mindestalter der Haupt-UTXO für attestPrice, propose, cancel (DAA)
+    pub min_gap_daa: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegisterV5State {
+    pub ticket: bool,
+    #[serde(with = "hex_bytes")]
+    pub set_hash: Vec<u8>,
+    #[serde(with = "hex_bytes")]
+    pub fb_hash: Vec<u8>,
+    /// Wächter; 0…0 = keine
+    #[serde(with = "hex_bytes")]
+    pub guard_hash: Vec<u8>,
+    pub nonce: i64,
+    pub emerg: bool,
+    /// vom Wächter gesperrt
+    pub locked: bool,
+    pub last_daa: i64,
+    #[serde(with = "hex_bytes")]
+    pub oracle_cov: Vec<u8>,
+    #[serde(with = "hex_bytes")]
+    pub oracle_tpl: Vec<u8>,
+    pub oracle_pre: i64,
+    pub oracle_suf: i64,
+    pub initialized: bool,
+}
+
+impl RegisterV5State {
+    pub fn genesis(set: &SignerSet, fb_hash: Option<[u8; 32]>, guard_hash: Option<[u8; 32]>, last_daa: i64) -> Self {
+        Self {
+            ticket: false,
+            set_hash: set.hash().to_vec(),
+            fb_hash: fb_hash.unwrap_or([0; 32]).to_vec(),
+            guard_hash: guard_hash.unwrap_or([0; 32]).to_vec(),
+            nonce: 0,
+            emerg: false,
+            locked: false,
+            last_daa,
+            oracle_cov: vec![0; 32],
+            oracle_tpl: vec![0; 32],
+            oracle_pre: 0,
+            oracle_suf: 0,
+            initialized: false,
+        }
+    }
+}
+
+pub fn register_v5(p: &RegisterV5Params, s: &RegisterV5State) -> Artifact {
+    compile(
+        REGISTER_V5_SRC,
+        vec![
+            ArtifactValue::Bytes(p.deployer.clone()),
+            ArtifactValue::Int(p.min_signers),
+            ArtifactValue::Int(p.min_threshold),
+            ArtifactValue::Int(p.rot_delay_daa),
+            ArtifactValue::Int(p.emerg_after_daa),
+            ArtifactValue::Int(p.emerg_delay_daa),
+            ArtifactValue::Int(p.min_gap_daa),
+            ArtifactValue::Bool(s.ticket),
+            ArtifactValue::Bytes(s.set_hash.clone()),
+            ArtifactValue::Bytes(s.fb_hash.clone()),
+            ArtifactValue::Bytes(s.guard_hash.clone()),
+            ArtifactValue::Int(s.nonce),
+            ArtifactValue::Bool(s.emerg),
+            ArtifactValue::Bool(s.locked),
+            ArtifactValue::Int(s.last_daa),
+            ArtifactValue::Bytes(s.oracle_cov.clone()),
+            ArtifactValue::Bytes(s.oracle_tpl.clone()),
+            ArtifactValue::Int(s.oracle_pre),
+            ArtifactValue::Int(s.oracle_suf),
+            ArtifactValue::Bool(s.initialized),
+        ],
+    )
+}
+
+/// Wächter: 1 bis 3 x-only-Schlüssel, jeder einzelne darf sperren
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardSet {
+    #[serde(with = "hex_vec")]
+    pub keys: Vec<Vec<u8>>,
+}
+
+impl GuardSet {
+    /// sha256(n ‖ g0 ‖ … ‖ g(n−1)) wie guardLock im Register v5
+    pub fn hash(&self) -> [u8; 32] {
+        let mut m = script_num8(self.keys.len() as i64).to_vec();
+        for k in &self.keys {
+            m.extend_from_slice(k);
+        }
+        sha256(&m)
+    }
+    /// Argumente gn, gkeys
+    pub fn args(&self) -> Vec<ArtifactValue> {
+        vec![ArtifactValue::Int(self.keys.len() as i64), ArtifactValue::Array(self.keys.iter().cloned().map(ArtifactValue::Bytes).collect())]
+    }
+}
+
+/// Ankündigung v5 (Payload der propose-Tx): newSet ‖ newFb ‖ newGuard
+pub fn announcement_v5(set: &[u8; 32], fb: &[u8; 32], guard: &[u8; 32]) -> Vec<u8> {
+    let mut v = set.to_vec();
+    v.extend_from_slice(fb);
+    v.extend_from_slice(guard);
+    v
+}
+
+/// Signierte Nachricht einer Sperre: sha256(regCov ‖ 0x05 ‖ nonce)
+pub fn lock_digest(reg_cov: &Hash, nonce: i64) -> [u8; 32] {
+    let mut m = reg_cov.as_bytes().to_vec();
+    m.push(TAG_LOCK);
+    m.extend_from_slice(&script_num8(nonce));
+    sha256(&m)
+}
+
+/// Vault v5: Parameter wie v4 plus Abwicklung
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VaultV5Params {
+    pub base: VaultParams,
+    /// Abwicklung ab so langer Stille des eingefrorenen Orakels (DAA)
+    pub settle_after_daa: i64,
+    /// Abschlag der Abwicklung in bps (bleibt im Vault)
+    pub settle_fee_bps: i64,
+}
+
+pub fn vault_v5(p: &VaultV5Params, owner: &[u8], st: &VaultState) -> Artifact {
+    let b = &p.base;
+    compile(
+        VAULT_V5_SRC,
+        vec![
+            hash_bytes(&b.oracle_cov),
+            ArtifactValue::Int(b.oracle_tpl.prefix.len() as i64),
+            ArtifactValue::Int(b.oracle_tpl.suffix.len() as i64),
+            ArtifactValue::Bytes(b.oracle_tpl.hash.clone()),
+            hash_bytes(&b.ghost_cov),
+            ArtifactValue::Int(b.ghost_tpl.prefix.len() as i64),
+            ArtifactValue::Int(b.ghost_tpl.suffix.len() as i64),
+            ArtifactValue::Bytes(b.ghost_tpl.hash.clone()),
+            ArtifactValue::Int(b.mcr_bps),
+            ArtifactValue::Int(b.liq_bps),
+            ArtifactValue::Int(b.bonus_bps),
+            ArtifactValue::Int(b.max_debt),
+            ArtifactValue::Bytes(b.interest_spk.clone()),
+            ArtifactValue::Int(p.settle_after_daa),
+            ArtifactValue::Int(p.settle_fee_bps),
+            ArtifactValue::Bytes(owner.to_vec()),
+            ArtifactValue::Int(st.debt),
+            ArtifactValue::Int(st.interest),
+            ArtifactValue::Int(st.index_at),
+        ],
+    )
+}
+
+/// Pool v5: gleiche Konstruktor-Argumente wie Pool v4 (Kursband Pflicht)
+pub fn pool_v5(p: &crate::pool::PoolParams, lp_cov: &Hash, initialized: bool) -> Result<Artifact, String> {
+    let b = p.band.as_ref().ok_or("Pool v5 braucht ein Kursband")?;
+    Ok(compile(
+        POOL_V5_SRC,
+        vec![
+            ArtifactValue::Bytes(p.ghost_cov.as_bytes().to_vec()),
+            ArtifactValue::Int(p.tpl.prefix.len() as i64),
+            ArtifactValue::Int(p.tpl.suffix.len() as i64),
+            ArtifactValue::Bytes(p.tpl.hash.clone()),
+            ArtifactValue::Int(p.fee_bps),
+            ArtifactValue::Bytes(p.creator.clone()),
+            ArtifactValue::Bytes(b.oracle_cov.as_bytes().to_vec()),
+            ArtifactValue::Int(b.oracle_tpl.prefix.len() as i64),
+            ArtifactValue::Int(b.oracle_tpl.suffix.len() as i64),
+            ArtifactValue::Bytes(b.oracle_tpl.hash.clone()),
+            ArtifactValue::Int(b.band_bps),
+            ArtifactValue::Bool(b.stop_when_frozen),
+            ArtifactValue::Bytes(lp_cov.as_bytes().to_vec()),
+            ArtifactValue::Bool(initialized),
+        ],
+    ))
+}
+
 // ------------------------------------------------------------ serde-Helfer ----
 
 pub mod hex_bytes {

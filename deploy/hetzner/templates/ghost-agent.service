@@ -6,6 +6,11 @@
 #
 # WICHTIG: Läuft dieser Dienst, muss der Agent auf dem Mac aus bleiben
 # (sonst streiten beide um dieselben UTXOs).
+#
+# Rechtemodell (Audit 20 A20c-3, README „Benutzer und Rechte“): Der Agent ist
+# der einzige Dienst als Benutzer ghost und damit der einzige, der keys/
+# (700 ghost) lesen kann. Die Seite läuft als ghost-web und teilt mit ihm nur
+# deployments/ (2770 ghost:ghost); neue Dateien deshalb 660 (UMask 0007).
 [Unit]
 Description=GHOST-Agent (Kaspa-Mainnet)
 Wants=network-online.target
@@ -30,6 +35,8 @@ TimeoutStopSec=30
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=@GHOST_DIR@/deployments
+# Was in deployments/ oder /tmp liegt, ist nie ausführbar
+NoExecPaths=@GHOST_DIR@/deployments /tmp /var/tmp /dev/shm
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
@@ -39,15 +46,25 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
+# fremde Prozesse (Seite) in /proc unsichtbar; die Seite sieht den Agenten ebenso nicht
+ProtectProc=invisible
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+RemoveIPC=true
+KeyringMode=private
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @obsolete
+SystemCallErrorNumber=EPERM
 CapabilityBoundingSet=
-UMask=0077
+AmbientCapabilities=
+# 660 statt 600: die Seite (Gruppe ghost) muss Zustand, Sperren und Journal
+# lesen und fortschreiben können; keys/ bleibt 700 und wird hier nie beschrieben
+UMask=0007
 
 [Install]
 WantedBy=multi-user.target

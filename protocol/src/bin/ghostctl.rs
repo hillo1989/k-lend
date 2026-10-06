@@ -685,6 +685,10 @@ enum SignerCmd {
         /// … oder x-only-Pubkeys (hex, durch Komma getrennt)
         #[arg(long)]
         new_keys: Option<String>,
+        /// … oder den aktuellen Satz behalten (Schlüssel und Schwellen), etwa um
+        /// nur einen Notfallsatz nachzutragen (GHOST-Notfallsatz.command)
+        #[arg(long, conflicts_with_all = ["new_committee", "new_keys", "threshold", "rotate_threshold"])]
+        same_set: bool,
         /// Preis-Schwelle des neuen Satzes (Standard: Mehrheit)
         #[arg(long)]
         threshold: Option<i64>,
@@ -696,7 +700,9 @@ enum SignerCmd {
         fallback_keys: Option<String>,
         #[arg(long)]
         fallback_threshold: Option<i64>,
-        /// Notfallweg: signiert vom Notfallsatz, erst nach langer Stille des Orakels
+        /// Notfallweg: signiert vom Notfallsatz, erst nach langer Stille des
+        /// Orakels und nur bei EINGEFRORENEM Orakel (sonst entwertet ein Replay
+        /// der letzten Preis-Signatur die Ankündigung, Audit 20 A20a-1)
         #[arg(long)]
         emergency: bool,
     },
@@ -824,11 +830,17 @@ impl Ctx {
     }
     /// Offene Tx klären, dann mit dem Netz abgleichen (Audit 4 F1/F4, Audit 3 O-1).
     async fn load_synced(&self) -> Result<Deployment, String> {
+        self.load_synced_with(&store::SyncScope::full()).await
+    }
+    /// Wie `load_synced` im Umfang `scope` (Audit 20 A20b-1/A20e-7): Die
+    /// Orakel-Runde gleicht nur ab, was ein Preis-Update braucht, der Keeper
+    /// Vaults und die eigenen Token, fremde Token reihum.
+    async fn load_synced_with(&self, scope: &store::SyncScope) -> Result<Deployment, String> {
         if let Some(msg) = store::resolve_pending(&self.net, &self.state_path).await? {
             say!("Hinweis: {msg}");
         }
         let mut d = self.load()?;
-        let mut notes = store::resync(&self.net, &mut d).await?;
+        let mut notes = store::resync_with(&self.net, &mut d, scope).await?;
         // Tauschpool: Dritte tauschen laufend; aktuelle UTXO über die feste Adresse
         if let Some(rec) = d.pool.clone() {
             match pool::resync(&self.net, &self.network, &rec).await {
@@ -1243,6 +1255,9 @@ async fn run(cli: Cli) -> Result<Option<serde_json::Value>, String> {
             return Err(old_version_error(&state_path, ver));
         }
     }
+    // A20c-1: Eingaben der öffentlichen Befehle (Seite) prüfen, bevor die
+    // Verbindung zum Node 10 s und mehr kostet
+    public_precheck(&cli.cmd, &cli.network)?;
     let net = Net::connect(&cli.network, cli.rpc.as_deref()).await?;
     // Tresore: eigene Datei, eigene Sperre, eigenes Journal (unabhängig von GHOST)
     let state_path = if matches!(cli.cmd, Cmd::Tresor { .. }) { tresor::path_for(&state_path) } else { state_path };
@@ -1801,6 +1816,9 @@ async fn run(cli: Cli) -> Result<Option<serde_json::Value>, String> {
             let found: Vec<_> = ctx.net.utxos(&ctx.net.address_of_spk(&tspk)?).await?.into_iter().filter(|(_, e)| e.covenant_id == Some(gcov)).collect();
             let _save_lock = if public && !found.is_empty() && !ctx.dry_run {
                 let l = store::lock(&ctx.state_path, Duration::from_secs(10))?;
+                // A20b-5: erst das Journal klären, wie jeder andere Schreiber –
+                // sonst überschriebe sein Folgezustand die eben eingetragenen Token
+                receive_resolve(store::resolve_pending(&ctx.net, &ctx.state_path).await)?;
                 d = ctx.load()?;
                 Some(l)
             } else {
@@ -1826,10 +1844,7 @@ async fn run(cli: Cli) -> Result<Option<serde_json::Value>, String> {
             let prefix = kaspa_addresses::Prefix::from(kaspa_lending_protocol::net::network_id(&ctx.network)?);
             let mut out = Vec::new();
             for a in &address {
-                let addr = kaspa_addresses::Address::try_from(a.as_str()).map_err(|e| format!("--address: {e}"))?;
-                if addr.prefix != prefix {
-                    return Err(format!("Adresse gehört zu einem anderen Netz ({})", addr.prefix));
-                }
+                let addr = checked_address(a, prefix, "--address")?;
                 for (op, e) in ctx.net.utxos(&addr).await? {
                     out.push(json!({
                         "address": addr.to_string(),
@@ -2230,7 +2245,7 @@ fn chrono_now() -> String {
 /// Nach dem Abgleich plant `keeper_plan` ohne Netz, `keeper_act` liquidiert
 /// bzw. löst auf; beide laufen in den Tests ohne Netz (Audit 12, Restpunkt B-P3).
 async fn keeper_round(round: &Ctx, k: &Keypair, market: i64, now: &str) {
-    let mut d = match round.load_synced().await {
+    let mut d = match round.load_synced_with(&keeper_scope(k)).await {
         Ok(d) => d,
         Err(e) => return eprintln!("[{now}] Keeper: Abgleich fehlgeschlagen: {e}"),
     };
@@ -2256,6 +2271,18 @@ async fn keeper_round(round: &Ctx, k: &Keypair, market: i64, now: &str) {
     }
     let Some(plan) = keeper_plan(&d, &xonly(k), market, now) else { return };
     keeper_act(&mut KeeperNet { round, d: &d, k, now }, &plan, now).await;
+}
+
+/// Fremde Token, die der Keeper je Runde mit abgleicht (reihum); die eigenen
+/// immer (Audit 20 A20b-1). Bei 1 000 Einträgen (ops::MAX_TOKENS) ist jeder
+/// nach 20 Runden einmal geprüft, beim Startskript (300 s) also etwa alle 2 h.
+const AGENT_FOREIGN_TOKENS: usize = 50;
+static TOKEN_CURSOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Abgleich der Keeper-Runde: alle Vaults, die eigenen Token, fremde reihum
+fn keeper_scope(k: &Keypair) -> store::SyncScope {
+    let start = TOKEN_CURSOR.fetch_add(AGENT_FOREIGN_TOKENS, std::sync::atomic::Ordering::Relaxed);
+    store::SyncScope { vaults: true, tokens: store::TokenSync::Owners { owners: vec![xonly(k)], foreign: AGENT_FOREIGN_TOKENS, start } }
 }
 
 /// Friert das Orakel ein, wenn seine Frist ohne Preis abgelaufen ist.
@@ -2668,48 +2695,71 @@ fn rate_restart(file: &RateFile<'_>) {
     }
 }
 
-/// Zinsregel (Version 3): eine Messung des GHOST-Kurses je Runde aus dem frisch
-/// abgeglichenen Pool `d` (nicht aus der Datei der Vorrunde, A11-O-8), Median
-/// der Messungen der letzten Stunde, Änderung nur mit ≥ 6 Messungen über
-/// ≥ 45 min (A12-12), ab Mindestliquidität und höchstens einmal je Stunde
-/// (A11-O-1, A11-O-9).
+/// Was die Zinsregel in einer Runde ergibt (ohne Netz, testbar)
+#[derive(Debug, PartialEq)]
+enum RateStep {
+    /// Zins unter dem Grundzins: nächster Schritt `next`, erlaubt nach `wait` s (0 = jetzt)
+    Floor { next: f64, wait: u64 },
+    /// Entscheidung der Kursregel nach der Messung `g`
+    Rule { g: f64, dec: rate::Decision },
+    /// nicht gemessen (Grund), keine Zinsänderung
+    NoSample(String),
+}
+
+/// Kern der Zinsregel auf der Zinsdatei `l` zum Zeitpunkt `t`: erst kappen
+/// (Zukunftszeit, A12-3), dann die Messung aufnehmen – auch während der
+/// Grundzins-Anhebung, damit danach nicht erst 45 min Messungen fehlen
+/// (Audit 20 A20b-6/A20e-15) –, dann Grundzins oder Kursregel. Vorher kehrte
+/// der Grundzins-Pfad vor `prune` und `record` zurück: Eine `last_change` aus
+/// der Zukunft hielt ihn für immer auf (A20b-2).
+fn rate_step(l: &mut rate::RateLog, t: u64, cur: f64, measured: &Result<f64, String>, ratio: Option<f64>) -> RateStep {
+    l.prune(t);
+    if let Ok(g) = measured {
+        l.record_pool(t, *g, ratio);
+    }
+    if let Some(next) = math::rate_floor_step(cur) {
+        return RateStep::Floor { next, wait: l.wait_secs(t) };
+    }
+    match measured {
+        Ok(g) => RateStep::Rule { g: *g, dec: l.decide(t, cur) },
+        Err(why) => RateStep::NoSample(why.clone()),
+    }
+}
+
+/// Zinsregel: eine Messung des GHOST-Kurses je Runde aus dem frisch
+/// abgeglichenen Pool `d` (nicht aus der Datei der Vorrunde, A11-O-8), samt
+/// Tauschverhältnis des Pools (Handel, A20e-6). Median der Messungen der
+/// letzten Stunde, Änderung nur mit ≥ 6 Messungen über ≥ 45 min (A12-12), ab
+/// Mindestliquidität, nur außerhalb der Totzone 0,97–1,03 USD und nur, wenn
+/// der Pool im Fenster gehandelt wurde, höchstens einmal je Stunde (A11-O-1,
+/// A11-O-9). Liegt der Zins unter dem Grundzins, hebt sie ihn stündlich an.
 /// Some((neuer Zins % p. a., Begründung)), wenn eine Änderung fällig ist.
 fn rate_plan(round: &Ctx, d: &Deployment, market: i64, now: &str) -> Option<(f64, String)> {
-    // Grundzins zuerst: liegt der Zins darunter, in Vertragsschritten anheben
-    // (höchstens einmal je Stunde, unabhängig von Kurs und Pool-Liquidität)
     let cur = apr_of(d.oracle.state.stable_rate);
-    if let Some(next) = math::rate_floor_step(cur) {
-        return match rate_log(round, |l| l.wait_secs(unix_now())) {
-            Ok(0) => Some((next, format!("Grundzins {:.1} % p. a.: Zins {cur:.2} % → {next:.2} % p. a.", math::RATE_MIN_PCT))),
-            Ok(s) => {
-                say!("[{now}] Zinsregel: Zins {cur:.2} % liegt unter dem Grundzins {:.1} % – nächster Schritt in {} min", math::RATE_MIN_PCT, s.div_ceil(60));
-                None
-            }
-            Err(e) => {
-                eprintln!("[{now}] Zinsregel: {e} – keine Zinsänderung");
-                None
-            }
-        };
-    }
     let pool = d.pool.as_ref().map(|p| (p.kas(), p.ghost()));
-    let g = match rate::measure(pool, d.pool_unresolved.as_deref(), market) {
-        Ok(g) => g,
-        Err(why) => {
-            say!("[{now}] Zinsregel: {why} – keine Messung, keine Zinsänderung");
-            return None;
-        }
-    };
+    let measured = rate::measure(pool, d.pool_unresolved.as_deref(), market);
+    let ratio = pool.and_then(|(x, y)| rate::pool_ratio(x, y));
     let t = unix_now();
-    let cur = apr_of(d.oracle.state.stable_rate);
-    let dec = match rate_log(round, |l| {
-        l.record(t, g);
-        l.decide(t, cur)
-    }) {
-        Ok(dec) => dec,
+    let step = match rate_log(round, |l| rate_step(l, t, cur, &measured, ratio)) {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("[{now}] Zinsregel: {e} – keine Zinsänderung");
             return None;
         }
+    };
+    let (g, dec) = match step {
+        // Grundzins zuerst: in Vertragsschritten anheben (höchstens einmal je
+        // Stunde, unabhängig von Kurs, Handel und Pool-Liquidität)
+        RateStep::Floor { next, wait: 0 } => return Some((next, format!("Grundzins {:.1} % p. a.: Zins {cur:.2} % → {next:.2} % p. a.", math::RATE_MIN_PCT))),
+        RateStep::Floor { wait, .. } => {
+            say!("[{now}] Zinsregel: Zins {cur:.2} % liegt unter dem Grundzins {:.1} % – nächster Schritt in {} min", math::RATE_MIN_PCT, wait.div_ceil(60));
+            return None;
+        }
+        RateStep::NoSample(why) => {
+            say!("[{now}] Zinsregel: {why} – keine Messung, keine Zinsänderung");
+            return None;
+        }
+        RateStep::Rule { g, dec } => (g, dec),
     };
     match dec {
         rate::Decision::Wait { secs_left } => {
@@ -2732,10 +2782,28 @@ fn rate_plan(round: &Ctx, d: &Deployment, market: i64, now: &str) -> Option<(f64
             say!("[{now}] Zinsregel: GHOST-Median {median:.4} USD aus {have} Messungen – Zins bleibt {cur:.2} % p. a.");
             None
         }
+        rate::Decision::NoTrade { median, have, moved } => {
+            say!(
+                "[{now}] Zinsregel: GHOST-Median {median:.4} USD aus {have} Messungen liegt außerhalb {:.2}–{:.2} USD, aber der Pool wurde in der letzten Stunde kaum gehandelt (Tauschverhältnis {:.2} %, nötig {:.0} %) – Zins bleibt {cur:.2} % p. a.",
+                1.0 - math::RATE_ZONE,
+                1.0 + math::RATE_ZONE,
+                moved * 100.0,
+                rate::MIN_TRADE_MOVE * 100.0
+            );
+            None
+        }
         rate::Decision::Change { median, have, next } => {
-            Some((next, format!("GHOST-Median {median:.4} USD aus {have} Messungen der letzten Stunde → Zins {cur:.2} % → {next:.2} % p. a.")))
+            Some((next, format!("GHOST-Median {median:.4} USD aus {have} Messungen der letzten Stunde (Pool gehandelt) → Zins {cur:.2} % → {next:.2} % p. a.")))
         }
     }
+}
+
+/// Ist die Zinspause des Vertrags (rateGapDaa, gezählt in DAA mit Rückstand
+/// 20 wie beim Senden) vorbei? Erst dann wird eine Zinsänderung vorgemerkt
+/// (Audit 20 A20b-6: vorher wurde vorgemerkt, `fit_rate` ließ den Zins aber
+/// weg, und der Schritt verschob sich um eine Stunde).
+fn rate_gap_over(d: &Deployment, daa: u64) -> bool {
+    daa.saturating_sub(20) as i64 >= d.oracle.state.last_rate_daa + d.oracle_params.rate_gap_daa
 }
 
 /// Zinsänderung vor dem Senden vormerken. None = ein anderer Prozess hat in
@@ -2769,11 +2837,18 @@ fn rate_release(round: &Ctx, reserved: (u64, Option<u64>), sent_before: usize) {
 
 /// Eine Runde des Orakel-Dauerbetriebs (oracle-feed und agent): Update, wenn
 /// der Preis sich um `min_change` bewegt hat oder das Update zu alt ist. Große
-/// Sprünge (> 20 %) erst nach 3 bestätigenden Runden und höchstens ×2/÷2.
-/// Die Zinsregel (rate_plan) fährt beim Update mit, sonst mit eigenem Update.
+/// Sprünge (> 20 %) erst nach 3 bestätigenden Runden und höchstens ×2/÷2; ist
+/// das Orakel alt oder eingefroren, sofort ein Zwischenschritt um höchstens
+/// 20 % (A20e-9). Die Zinsregel (rate_plan) fährt beim Update mit, sonst mit
+/// eigenem Update.
+///
+/// Abgeglichen wird nur, was das Preis-Update braucht (Orakel, Register,
+/// Factory, Wurzel, dazu der Pool für die Zinsregel), und das Update baut auf
+/// genau diesem Stand auf. Vaults und Token gleicht danach der Keeper ab:
+/// Viele Vaults oder Token verlangsamen so nie das Orakel (Audit 20
+/// A20e-7/A20b-1).
 async fn oracle_round(round: &Ctx, key: &Path, committee: &Path, min_change: f64, max_age_min: f64, streak: &std::sync::Mutex<Streak>, market: i64, now: &str) {
-    // einmal frisch abgleichen: Orakel, Vaults und Pool (die Zinsregel misst daran)
-    let d = match round.load_synced().await {
+    let d = match round.load_synced_with(&store::SyncScope::core()).await {
         Ok(d) => d,
         Err(e) => {
             // Fehlschlag unterbricht die Bestätigungsfolge (A10-A-7)
@@ -2811,6 +2886,11 @@ async fn oracle_round(round: &Ctx, key: &Path, committee: &Path, min_change: f64
             }
             if send {
                 say!("[{now}] Update fällig: {reason}");
+                // A20b-6: nur vormerken, wenn der Zins diesmal auch mitgehen darf
+                if rate.is_some() && !round.net.daa().await.is_ok_and(|daa| rate_gap_over(&d, daa)) {
+                    say!("[{now}] Zinsregel: Zinsänderung erst nach der Pause des Vertrags – diesmal nur der Preis");
+                    rate = None;
+                }
                 let reserved = if rate.is_some() { rate_reserve(round, now) } else { None };
                 if reserved.is_none() {
                     rate = None;
@@ -2821,7 +2901,7 @@ async fn oracle_round(round: &Ctx, key: &Path, committee: &Path, min_change: f64
                 // höchstens ×2/÷2 je Update (Vertragsgrenze)
                 let step = price.clamp((old + 1) / 2, old * 2).clamp(1_000, 90_000_000_000);
                 let before = sent_count();
-                let r = oracle_update_with(round, key, committee, step, rate.as_ref().map(|r| r.0), true).await;
+                let r = oracle_update_on(round, key, committee, step, rate.as_ref().map(|r| r.0), true, Some(d.clone())).await;
                 *streak.lock().unwrap() = Streak::default();
                 if let Err(e) = r {
                     eprintln!("[{now}] Orakel-Update fehlgeschlagen: {e}");
@@ -2836,7 +2916,7 @@ async fn oracle_round(round: &Ctx, key: &Path, committee: &Path, min_change: f64
             match rate {
                 // Preis unverändert, aber der Zins soll dem GHOST-Kurs folgen
                 // Pause des Vertrags (DAA) noch nicht um: keine Tx nur für den Preis (Audit 15 G-5)
-                Some(_) if round.net.daa().await.is_ok_and(|daa| (daa.saturating_sub(20) as i64) < d.oracle.state.last_rate_daa + d.oracle_params.rate_gap_daa) => {
+                Some(_) if !round.net.daa().await.is_ok_and(|daa| rate_gap_over(&d, daa)) => {
                     say!("[{now}] Zinsregel: Zinsänderung erst nach der Pause des Vertrags – diesmal keine");
                 }
                 Some((pct, why)) => {
@@ -2844,7 +2924,7 @@ async fn oracle_round(round: &Ctx, key: &Path, committee: &Path, min_change: f64
                         say!("[{now}] Zinsregel: {why}");
                         let step = market.clamp((old + 1) / 2, old * 2).clamp(1_000, 90_000_000_000);
                         let before = sent_count();
-                        if let Err(e) = oracle_update_with(round, key, committee, step, Some(pct), true).await {
+                        if let Err(e) = oracle_update_on(round, key, committee, step, Some(pct), true, Some(d.clone())).await {
                             eprintln!("[{now}] Zins-Update fehlgeschlagen: {e}");
                             rate_release(round, res, before);
                         }
@@ -2885,13 +2965,33 @@ fn fit_rate(p: &OracleParams, cur: &OracleState, want: i64, daa: i64) -> (i64, O
 }
 
 async fn feed_due(ctx: &Ctx, d: &Deployment, min_change: f64, max_age_min: f64, max_jump: f64, p: i64) -> Result<Option<(String, i64, bool)>, String> {
+    let age_min = (ctx.net.daa().await? as i64 - d.oracle.state.oracle_daa) as f64 / 600.0;
+    Ok(feed_decision(d, age_min, min_change, max_age_min, max_jump, p))
+}
+
+/// Update-Entscheidung ohne Netz: Some((Grund, Preis, großer_Sprung)).
+/// Große Sprünge (über `max_jump`) warten auf Bestätigung (A10-A-7) – außer
+/// das Orakel ist eingefroren oder älter als der Herzschlag: Dann geht sofort
+/// ein Zwischenschritt um höchstens `max_jump` hinaus (Audit 20 A20e-9: vorher
+/// schlug die Sprungsperre Herzschlag und Auftauen; in einem unruhigen Crash
+/// blieb der alte Preis stehen, das Orakel fror ein und blieb eingefroren,
+/// bis drei ruhige Runden kamen).
+fn feed_decision(d: &Deployment, age_min: f64, min_change: f64, max_age_min: f64, max_jump: f64, p: i64) -> Option<(String, i64, bool)> {
     let old = d.oracle.state.kas_usd as f64;
     let change = (p as f64 - old) / old;
     if change.abs() > max_jump {
-        return Ok(Some((format!("großer Preissprung {:+.1} % ({:.6} → {:.6} USD)", change * 100.0, old / 1e8, p as f64 / 1e8), p, true)));
+        let jump = format!("großer Preissprung {:+.1} % ({:.6} → {:.6} USD)", change * 100.0, old / 1e8, p as f64 / 1e8);
+        let stale = d.oracle.state.frozen || age_min > heartbeat_min(d.oracle_params.freeze_after_daa, max_age_min);
+        if stale {
+            let lo = (old * (1.0 - max_jump)).ceil() as i64;
+            let hi = (old * (1.0 + max_jump)).floor() as i64;
+            let step = p.clamp(lo, hi);
+            let why = if d.oracle.state.frozen { "Orakel eingefroren".to_string() } else { format!("Alter {age_min:.0} min") };
+            return Some((format!("{jump}, {why} – Zwischenschritt um höchstens {:.0} % auf {:.6} USD", max_jump * 100.0, step as f64 / 1e8), step, false));
+        }
+        return Some((jump, p, true));
     }
-    let age_min = (ctx.net.daa().await? as i64 - d.oracle.state.oracle_daa) as f64 / 600.0;
-    Ok(feed_reason(d, age_min, min_change, max_age_min, p).map(|r| (r, p, false)))
+    feed_reason(d, age_min, min_change, max_age_min, p).map(|r| (r, p, false))
 }
 
 /// Grund für ein Update ohne großen Sprung, ohne Netz (Audit 15: testbar)
@@ -2935,9 +3035,20 @@ async fn oracle_update_price(ctx: &Ctx, key: &Path, committee: &Path, kas_usd: i
 
 /// `fit`: Zinsregel des Agenten – den Zins an die Vertragsgrenzen anpassen statt abzulehnen
 async fn oracle_update_with(ctx: &Ctx, key: &Path, committee: &Path, kas_usd: i64, rate: Option<f64>, fit: bool) -> Result<(), String> {
+    oracle_update_on(ctx, key, committee, kas_usd, rate, fit, None).await
+}
+
+/// Preis-Update auf dem Stand `base` (Orakel-Runde: eben abgeglichen, unter
+/// derselben Sperre) oder, ohne `base`, nach einem Abgleich im Umfang
+/// `SyncScope::core()` – Vaults und Token braucht ein Preis-Update nicht
+/// (Audit 20 A20e-7)
+async fn oracle_update_on(ctx: &Ctx, key: &Path, committee: &Path, kas_usd: i64, rate: Option<f64>, fit: bool, base: Option<Deployment>) -> Result<(), String> {
     let k = load_key(key)?;
     let com = load_committee(committee)?;
-    let d = ctx.load_synced().await?;
+    let d = match base {
+        Some(d) => d,
+        None => ctx.load_synced_with(&store::SyncScope::core()).await?,
+    };
     if d.signers_unknown {
         return Err("Der Unterzeichner-Satz im Register ist dieser Zustandsdatei unbekannt (Austausch von einem anderen Rechner) – Preis-Updates erst mit dessen Datei".into());
     }
@@ -2985,6 +3096,28 @@ fn hex32_list(s: &str, what: &str) -> Result<Vec<Vec<u8>>, String> {
         .collect()
 }
 
+/// Notfallweg nur bei eingefrorenem Orakel (Audit 20 A20a-1): Die Signatur
+/// des letzten Preis-Updates steht öffentlich auf der Kette. Solange das
+/// Orakel nicht eingefroren ist, kann jeder sie zusammen mit einem Orakel-
+/// `read` wiederholen; das Register wertet das als Lebenszeichen des
+/// Hauptsatzes und entwertet die Notfall-Ankündigung (nonce + 1), ohne
+/// Schlüssel und für ≈ 0,02 KAS. Ist das Orakel eingefroren, scheitert der
+/// Replay, und auftauen kann nur ein echtes Update des Hauptsatzes.
+fn check_emergency_allowed(d: &Deployment, emergency: bool, daa: u64) -> Result<(), String> {
+    if !emergency || d.oracle.state.frozen {
+        return Ok(());
+    }
+    let due = d.oracle.state.oracle_daa + d.oracle_params.freeze_after_daa;
+    let how = if (daa.saturating_sub(20) as i64) >= due {
+        "Die Einfrier-Frist ist um: zuerst `ghostctl oracle-freeze --key …` (darf jeder), dann erneut.".to_string()
+    } else {
+        format!("Einfrieren ist erst ab DAA {due} möglich (in etwa {:.1} h).", (due - daa as i64) as f64 / HOUR_DAA as f64)
+    };
+    Err(format!(
+        "Notfallweg nur bei eingefrorenem Orakel: sonst kann jeder die letzte Preis-Signatur wiederholen und damit die Notfall-Ankündigung entwerten (Audit 20 A20a-1). {how}"
+    ))
+}
+
 fn set_json(s: &SignerSet) -> serde_json::Value {
     serde_json::json!({ "keys": s.keys.iter().map(|k| faster_hex::hex_string(k)).collect::<Vec<_>>(), "threshold": s.t, "rotateThreshold": s.t_rot })
 }
@@ -3021,16 +3154,22 @@ async fn signers_cmd(ctx: &Ctx, cmd: SignerCmd, extra: &mut serde_json::Map<Stri
     let daa = ctx.net.daa().await?;
     match cmd {
         SignerCmd::Show => {}
-        SignerCmd::Propose { key, committee, new_committee, new_keys, threshold, rotate_threshold, fallback_keys, fallback_threshold, emergency } => {
+        SignerCmd::Propose { key, committee, new_committee, new_keys, same_set, threshold, rotate_threshold, fallback_keys, fallback_threshold, emergency } => {
+            // A20a-1: vor allem anderen, mit verständlicher Meldung (ops::propose prüft es ebenso)
+            check_emergency_allowed(&d, emergency, daa)?;
             let k = load_key(&key)?;
             let com = load_committee(&committee)?;
-            let keys = match (new_committee, new_keys) {
-                (Some(f), None) => load_committee(&f)?.iter().map(xonly).collect(),
-                (None, Some(h)) => hex32_list(&h, "--new-keys")?,
-                _ => return Err("genau eines von --new-committee oder --new-keys angeben".into()),
+            let new_set = if same_set {
+                d.signer_set.clone()
+            } else {
+                let keys = match (new_committee, new_keys) {
+                    (Some(f), None) => load_committee(&f)?.iter().map(xonly).collect(),
+                    (None, Some(h)) => hex32_list(&h, "--new-keys")?,
+                    _ => return Err("genau eines von --new-committee, --new-keys oder --same-set angeben".into()),
+                };
+                let t = threshold.unwrap_or(keys.len() as i64 / 2 + 1);
+                SignerSet { keys, t, t_rot: rotate_threshold.unwrap_or(t) }
             };
-            let t = threshold.unwrap_or(keys.len() as i64 / 2 + 1);
-            let new_set = SignerSet { keys, t, t_rot: rotate_threshold.unwrap_or(t) };
             let fb = match fallback_keys {
                 Some(h) => {
                     let keys = hex32_list(&h, "--fallback-keys")?;
@@ -4015,6 +4154,120 @@ fn wallet_action_of(d: &Deployment, prefix: kaspa_addresses::Prefix, owner: &[u8
     })
 }
 
+/// `receive --owner`: Ergebnis der Journal-Klärung unter der Sperre. Ist eine
+/// Transaktion noch unterwegs oder unklar, wird nichts eingetragen (Audit 20
+/// A20b-5), mit einer Meldung, die die Seite als „gleich erneut“ zeigt.
+fn receive_resolve(r: Result<Option<String>, String>) -> Result<(), String> {
+    match r {
+        Ok(Some(msg)) => {
+            say!("Hinweis: {msg}");
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(e) => Err(format!("Gerade wird eine Transaktion abgeschlossen – bitte in einer Minute erneut suchen; nichts eingetragen ({e})")),
+    }
+}
+
+/// Adresse mit bech32-Prüfsumme, Präfix des Netzes und Version
+fn checked_address(a: &str, prefix: kaspa_addresses::Prefix, what: &str) -> Result<kaspa_addresses::Address, String> {
+    let addr = kaspa_addresses::Address::try_from(a.trim()).map_err(|_| format!("{what}: keine gültige Kaspa-Adresse"))?;
+    if addr.prefix != prefix {
+        return Err(format!("{what}: Adresse gehört zu einem anderen Netz ({})", addr.prefix));
+    }
+    Ok(addr)
+}
+
+/// `wallet build` ohne Netz und ohne Zustand prüfen (Audit 20 A20c-1): Adresse
+/// (Prüfsumme, Netz, Schnorr), Aktion, Empfänger, Beträge, IDs, Nachricht,
+/// Termine. Was den Zustand braucht (Vault-Nummer, Schuld, Pool), prüft danach
+/// `wallet_action_of` wie bisher.
+fn wallet_build_precheck(prefix: kaspa_addresses::Prefix, cmd: &WalletCmd) -> Result<(), String> {
+    use kaspa_lending_protocol::wallet_ops::ghost_target;
+    let WalletCmd::Build {
+        action, address, vault_id, kas, ghost, keep, to, message, min, min_shares, percent, min_kas, min_ghost, amount: per, interval, start, time, fund, max_fee, tresor: id, ..
+    } = cmd
+    else {
+        return Ok(());
+    };
+    kaspa_lending_protocol::wallet::xonly_of_address(address, prefix)?;
+    const ACTIONS: [&str; 17] = [
+        "open-vault", "mint", "repay", "deposit", "withdraw", "close", "sweep", "redeem", "liquidate", "send", "transfer", "swap", "pool-add", "pool-remove", "tresor-open", "tresor-topup",
+        "tresor-cancel",
+    ];
+    if !ACTIONS.contains(&action.as_str()) {
+        return Err(format!("unbekannte Aktion „{action}“ ({})", ACTIONS.join(", ")));
+    }
+    for (v, n) in [(kas, "--kas"), (ghost, "--ghost"), (keep, "--keep"), (min, "--min"), (per, "--amount"), (fund, "--fund"), (max_fee, "--max-fee")] {
+        if let Some(x) = v {
+            amount(*x, n)?;
+        }
+    }
+    for (v, n) in [(min_kas, "--min-kas"), (min_ghost, "--min-ghost")] {
+        if let Some(x) = v {
+            if *x > 0.0 {
+                amount(*x, n)?;
+            }
+        }
+    }
+    if let Some(p) = percent {
+        if !(*p > 0.0 && *p <= 100.0) {
+            return Err("--percent muss zwischen 0 und 100 liegen".into());
+        }
+    }
+    if min_shares.is_some_and(|m| m < 1) {
+        return Err("--min-shares muss mindestens 1 sein".into());
+    }
+    let hex64 = |v: &Option<String>, n: &str| -> Result<(), String> {
+        match v {
+            Some(t) if t.trim().len() != 64 || !t.trim().bytes().all(|b| b.is_ascii_hexdigit()) => Err(format!("{n}: volle Covenant-ID (64 Hex-Zeichen) erwartet")),
+            _ => Ok(()),
+        }
+    };
+    hex64(vault_id, "--vault-id")?;
+    hex64(id, "--tresor")?;
+    if let Some(t) = to {
+        match action.as_str() {
+            "send" => {
+                checked_address(t, prefix, "--to")?;
+            }
+            "transfer" | "tresor-open" => {
+                ghost_target(prefix, t)?;
+            }
+            _ => {}
+        }
+    }
+    if let Some(m) = message {
+        abo::check_message(m.trim()).map_err(|e| format!("--message: {e}"))?;
+    }
+    if let Some(d) = start {
+        parse_date(d, "--start")?;
+    }
+    if let Some(i) = interval {
+        tresor_schedule(i, chrono::Utc::now().date_naive(), time.as_deref())?;
+    }
+    Ok(())
+}
+
+/// Öffentliche Befehle (Seite: .k-Namen, GHOST-Suche) vor der Verbindung zum
+/// Node prüfen (Audit 20 A20c-1): Adressen mit Prüfsumme und Netz, Betrag
+fn public_precheck(cmd: &Cmd, network: &str) -> Result<(), String> {
+    let prefix = || -> Result<kaspa_addresses::Prefix, String> { Ok(kaspa_addresses::Prefix::from(kaspa_lending_protocol::net::network_id(network)?)) };
+    match cmd {
+        Cmd::Utxos { address } => {
+            let p = prefix()?;
+            for a in address {
+                checked_address(a, p, "--address")?;
+            }
+        }
+        Cmd::Receive { owner: Some(o), ghost, .. } => {
+            kaspa_lending_protocol::wallet_ops::ghost_target(prefix()?, o)?;
+            amount(*ghost, "--ghost")?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Eigene UTXOs des Plans müssen am Node unverändert vorhanden sein
 async fn check_funding_at_node(net: &Net, plan: &kaspa_lending_protocol::wallet_ops::ActionPlan) -> Result<(), String> {
     let funding = kaspa_lending_protocol::wallet_ops::plan_funding(plan, net.prefix)?;
@@ -4079,6 +4332,12 @@ async fn wallet_action_cmd(network: &str, rpc: Option<&str>, state_path: &Path, 
         _ => false,
     };
     let state_path = if tresor_action { tresor::path_for(state_path) } else { state_path.to_path_buf() };
+    // A20c-1: Adresse und alle Eingaben von build VOR der Verbindung zum Node;
+    // vorher belegte eine Adresse mit falscher Prüfsumme 11–13 s einen der zwei
+    // Wallet-Plätze der Seite (bei submit prüft das schon `precheck`)
+    if let WalletCmd::Build { .. } = cmd {
+        wallet_build_precheck(kaspa_addresses::Prefix::from(kaspa_lending_protocol::net::network_id(network)?), cmd)?;
+    }
     let net = Net::connect(network, rpc).await?;
     let prefix = net.prefix;
     let ctx = Ctx { mainnet: network == "mainnet", yes, dry_run: !sending, network: network.into(), net, state_path };
@@ -5820,5 +6079,304 @@ mod tests {
         assert_eq!(j["rotation"]["readyInHours"], -1.0);
         let j = signers_json(&d, 100_000 - HOUR_DAA as u64);
         assert_eq!(j["rotation"]["readyInHours"], 1.0);
+    }
+
+    /// Audit 20 A20a-1: `signers propose --emergency` nur bei eingefrorenem
+    /// Orakel, mit Hinweis, ob Einfrieren schon geht; regulär immer
+    #[test]
+    fn a20a_1_notfallweg_nur_bei_eingefrorenem_orakel() {
+        let mut d = test_deployment();
+        let due = (d.oracle.state.oracle_daa + d.oracle_params.freeze_after_daa) as u64;
+        assert!(check_emergency_allowed(&d, false, 0).is_ok(), "regulärer Austausch");
+        let e = check_emergency_allowed(&d, true, due).unwrap_err();
+        assert!(e.contains("eingefrorenem Orakel") && e.contains("erst ab DAA"), "{e}");
+        let e = check_emergency_allowed(&d, true, due + 100).unwrap_err();
+        assert!(e.contains("oracle-freeze"), "{e}");
+        d.oracle.state.frozen = true;
+        assert!(check_emergency_allowed(&d, true, 0).is_ok());
+        // Verdrahtung: die Prüfung steht vor jedem Schlüssel und jedem Bau
+        let prop = code_between("SignerCmd::Propose { key, committee,", "SignerCmd::Cancel {");
+        assert!(prop.contains("check_emergency_allowed(&d,emergency,daa)?;letk=load_key(&key)?;"), "{prop}");
+    }
+
+    /// GHOST-Notfallsatz.command: die Aufrufe passen zur Kommandozeile von
+    /// ghostctl (gleicher Satz + Notfallsatz, Probelauf vor dem Senden,
+    /// Senden nur nach „ja“), der Schlüssel entsteht nie im Projekt
+    #[test]
+    fn notfallsatz_skript_passt_zu_ghostctl() {
+        let skript = include_str!("../../../GHOST-Notfallsatz.command");
+        assert!(skript.contains("ARGS=(signers propose --key \"$OWNER\" --committee \"$SIGNER\" --same-set --fallback-keys \"$PUB\" --fallback-threshold 1)"));
+        assert!(skript.contains("SIGNER=\"$KEYS-signer.json\"") && skript.contains("OWNER=\"$KEYS-owner.json\""));
+        assert!(skript.contains("./ghostctl --json committee-keygen \"$FILE\" --count 1"));
+        // erst Probelauf, dann ausdrücklich „ja“, dann --ja
+        let (vor, nach) = skript.split_once("g --ja \"${ARGS[@]}\"").expect("Senden der Ankündigung");
+        assert!(vor.contains("g --dry-run \"${ARGS[@]}\"") && vor.contains("[ \"$a\" = \"ja\" ] || fail"), "Probelauf und Bestätigung davor");
+        assert!(!nach.contains("g --ja \"${ARGS[@]}\""));
+        let (vor, _) = skript.split_once("g --ja signers activate").expect("Aktivieren");
+        assert!(vor.contains("g --dry-run signers activate --key \"$OWNER\""));
+        assert!(skript.contains("liegt im Projekt"), "Schlüssel nie im Projekt");
+        assert!(!skript.contains("cat \"$SIGNER\"") && !skript.contains("cat \"$OWNER\""), "liest keine Schlüsseldatei selbst");
+        // die Kommandozeile nimmt genau diese Form an
+        let hex = "11".repeat(32);
+        let ok = Cli::try_parse_from([
+            "ghostctl", "--network", "mainnet", "--state", "deployments/mainnet.json", "--dry-run", "signers", "propose", "--key", "k.json", "--committee", "s.json", "--same-set",
+            "--fallback-keys", &hex, "--fallback-threshold", "1",
+        ]);
+        assert!(ok.is_ok(), "{:?}", ok.err());
+        let bad = Cli::try_parse_from(["ghostctl", "signers", "propose", "--key", "k", "--committee", "s", "--same-set", "--new-keys", &hex]);
+        assert!(bad.is_err(), "--same-set und --new-keys schließen sich aus");
+        assert!(Cli::try_parse_from(["ghostctl", "--json", "committee-keygen", "/Volumes/X/n.json", "--count", "1"]).is_ok());
+    }
+
+    // ------------------------------------------------------------- Audit 20 ----
+
+    const T20: u64 = 1_790_000_000;
+
+    /// A20b-2: Liegt die letzte Zinsänderung in der Zukunft (Uhr lief vor) und
+    /// der Zins unter dem Grundzins, wartete der Grundzins-Pfad für immer.
+    /// Jetzt kappt `rate_step` zuerst: eine Stunde ab jetzt, dann der Schritt.
+    #[test]
+    fn a20b_2_grundzins_kappt_eine_zukunftszeit() {
+        let mut l = rate::RateLog::new("mainnet");
+        l.last_change = Some(T20 + 10 * 365 * 86_400);
+        let none: Result<f64, String> = Err("kein Tauschpool".into());
+        assert_eq!(rate_step(&mut l, T20, 0.0, &none, None), RateStep::Floor { next: 0.5, wait: rate::EVERY_SECS });
+        assert_eq!(l.last_change, Some(T20), "gekappt");
+        assert_eq!(rate_step(&mut l, T20 + rate::EVERY_SECS, 0.0, &none, None), RateStep::Floor { next: 0.5, wait: 0 });
+        // ab dem Grundzins entscheidet die Kursregel
+        assert_eq!(rate_step(&mut l, T20 + rate::EVERY_SECS, 2.0, &none, None), RateStep::NoSample("kein Tauschpool".into()));
+    }
+
+    /// A20b-6/A20e-15: Während der Grundzins-Anhebung wird weiter gemessen;
+    /// sobald 2 % erreicht sind, kann die Kursregel ohne neue 45 min entscheiden
+    #[test]
+    fn a20b_6_messung_auch_waehrend_der_grundzins_anhebung() {
+        let mut l = rate::RateLog::new("mainnet");
+        let mut t = T20;
+        for i in 0..12u64 {
+            let r = Some(25.0 * if i % 2 == 0 { 1.0 } else { 1.02 });
+            let s = rate_step(&mut l, t, 1.5, &Ok(0.9), r);
+            assert!(matches!(s, RateStep::Floor { next, .. } if next == 2.0), "{s:?}");
+            t += rate::SAMPLE_GAP_SECS;
+        }
+        assert!(l.window(t).len() >= rate::MIN_SAMPLES, "Messungen gesammelt");
+        let s = rate_step(&mut l, t, 2.0, &Ok(0.9), Some(25.0));
+        assert!(matches!(s, RateStep::Rule { dec: rate::Decision::Change { next, .. }, .. } if next == 2.5), "{s:?}");
+    }
+
+    /// A20b-6: vorgemerkt wird erst, wenn die Pause des Vertrags um ist (gleiche
+    /// Rechnung wie fit_rate: DAA mit Rückstand 20)
+    #[test]
+    fn a20b_6_vormerkung_erst_nach_der_vertragspause() {
+        let d = test_deployment();
+        let free = (d.oracle.state.last_rate_daa + d.oracle_params.rate_gap_daa) as u64 + 20;
+        assert!(!rate_gap_over(&d, free - 1));
+        assert!(rate_gap_over(&d, free));
+        let (r, note) = fit_rate(&d.oracle_params, &d.oracle.state, d.oracle.state.stable_rate + 1, free as i64 - 20 - 1);
+        assert!(note.is_some() && r == d.oracle.state.stable_rate, "fit_rate ließe den Zins hier weg");
+        let round = code_between("async fn oracle_round(", "\n}\n");
+        let (vor, _) = round.split_once("letreserved=ifrate.is_some(){rate_reserve(round,now)}else{None};").expect("Vormerkung");
+        assert!(vor.contains("ifrate.is_some()&&!round.net.daa().await.is_ok_and(|daa|rate_gap_over(&d,daa)){"), "{vor}");
+    }
+
+    /// A20e-9: großer Sprung bei altem oder eingefrorenem Orakel – sofort ein
+    /// gedeckelter Zwischenschritt (±20 %) statt Warten auf drei ruhige Runden
+    #[test]
+    fn a20e_9_zwischenschritt_bei_altem_oder_eingefrorenem_orakel() {
+        let mut d = test_deployment();
+        let old = d.oracle.state.kas_usd;
+        let crash = old / 2;
+        // frisches Orakel: Bestätigung abwarten wie bisher
+        let (_, p, big) = feed_decision(&d, 5.0, 0.005, 60.0, 0.20, crash).unwrap();
+        assert!(big && p == crash);
+        // älter als der Herzschlag: Zwischenschritt −20 %
+        let (why, p, big) = feed_decision(&d, 61.0, 0.005, 60.0, 0.20, crash).unwrap();
+        assert!(!big && p == (old as f64 * 0.8).ceil() as i64, "{why} {p}");
+        assert!(why.contains("Zwischenschritt"), "{why}");
+        let (_, p, big) = feed_decision(&d, 61.0, 0.005, 60.0, 0.20, old * 3).unwrap();
+        assert!(!big && p == (old as f64 * 1.2).floor() as i64);
+        // eingefroren: ebenso, auch wenn das Alter klein wäre
+        d.oracle.state.frozen = true;
+        let (_, p, big) = feed_decision(&d, 1.0, 0.005, 60.0, 0.20, crash).unwrap();
+        assert!(!big && p == (old as f64 * 0.8).ceil() as i64);
+        // jeder Schritt liegt im Vertragsrahmen ×2/÷2
+        assert!(p >= (old + 1) / 2 && p <= old * 2);
+        // kleiner Sprung: wie bisher
+        d.oracle.state.frozen = false;
+        assert_eq!(feed_decision(&d, 1.0, 0.005, 60.0, 0.20, old).map(|x| x.2), None.or(feed_reason(&d, 1.0, 0.005, 60.0, old).map(|_| false)));
+    }
+
+    /// A20b-1: Obergrenzen der Token-Liste
+    #[test]
+    fn a20b_1_token_liste_hat_obergrenzen() {
+        let mut d = test_deployment();
+        let t = |owner: u8, n: u32| ops::Tracked {
+            outpoint: kaspa_consensus_core::tx::TransactionOutpoint::new(kaspa_consensus_core::Hash::from_bytes([owner; 32]), n),
+            value: 1,
+            cov: kaspa_consensus_core::Hash::from_bytes([2; 32]),
+            state: GhostTok::to_pubkey(&[owner; 32], 1),
+        };
+        // ein Empfänger: höchstens 16 fremde Einträge
+        let took = (0..30).filter(|&n| ops::track_token(&mut d, t(1, n), false)).count();
+        assert_eq!(took, ops::MAX_TOKENS_PER_RECIPIENT);
+        // eigene neue Token (Wechselgeld, Prägen) bis 64
+        let took = (0..100).filter(|&n| ops::track_token(&mut d, t(2, n), true)).count();
+        assert_eq!(took, ops::MAX_TOKENS_PER_OWNER);
+        // insgesamt höchstens MAX_TOKENS für fremde Empfänger
+        for o in 3..=255u8 {
+            for n in 0..16 {
+                ops::track_token(&mut d, t(o, n), false);
+            }
+        }
+        assert_eq!(d.tokens.len(), ops::MAX_TOKENS);
+        assert!(!ops::track_token(&mut d, t(0, 0), false), "Liste voll: fremd nur noch über receive");
+        assert!(ops::track_token(&mut d, t(0, 1), true), "eigene gehen weiter (je Besitzer begrenzt)");
+    }
+
+    /// A20e-7/A20b-1: Orakel-Runde gleicht nur den Kern ab und baut das Update
+    /// auf genau diesem Stand; der Keeper gleicht danach Vaults, eigene Token
+    /// und fremde reihum ab
+    #[test]
+    fn a20e_7_orakel_vor_vault_und_token_abgleich() {
+        let round = code_between("async fn oracle_round(", "\n}\n");
+        assert!(round.starts_with("asyncfnoracle_round(") && round.contains("letd=matchround.load_synced_with(&store::SyncScope::core()).await{"), "{round}");
+        assert_eq!(round.matches("oracle_update_on(round,key,committee,").count(), 2);
+        assert_eq!(round.matches(",true,Some(d.clone())).await").count(), 2, "Update auf dem Stand der Runde");
+        assert!(!round.contains("load_synced()"), "kein voller Abgleich in der Orakel-Runde");
+        let upd = code_between("async fn oracle_update_on(", "\n}\n");
+        assert!(upd.contains("None=>ctx.load_synced_with(&store::SyncScope::core()).await?,"), "{upd}");
+        let keeper = code_between("async fn keeper_round(", "\n}\n");
+        assert!(keeper.contains("round.load_synced_with(&keeper_scope(k)).await"), "{keeper}");
+        let agent = code_between("Cmd::Agent { key,", "Cmd::OpenVault {");
+        let (o, k) = agent.split_once("keeper_round(&round,&k,m,&now).await;").unwrap();
+        assert!(o.contains("oracle_round(") && !k.contains("oracle_round("), "Orakel zuerst");
+        // Keeper-Umfang: eigene Token, fremde reihum
+        let k = new_key();
+        let (a, b) = (keeper_scope(&k), keeper_scope(&k));
+        match (a.tokens, b.tokens) {
+            (store::TokenSync::Owners { owners, foreign, start: s1 }, store::TokenSync::Owners { start: s2, .. }) => {
+                assert_eq!(owners, vec![xonly(&k)]);
+                assert_eq!(foreign, AGENT_FOREIGN_TOKENS);
+                assert_eq!(s2 - s1, AGENT_FOREIGN_TOKENS);
+            }
+            x => panic!("{x:?}"),
+        }
+        assert!(a.vaults);
+    }
+
+    /// A20b-5: `receive --owner` klärt unter der Sperre zuerst das Journal und
+    /// trägt bei offenem oder unklarem Journal nichts ein
+    #[test]
+    fn a20b_5_receive_klaert_das_journal() {
+        assert!(receive_resolve(Ok(None)).is_ok());
+        assert!(receive_resolve(Ok(Some("übernommen".into()))).is_ok());
+        let e = receive_resolve(Err("noch unterwegs".into())).unwrap_err();
+        assert!(e.contains("erneut") && e.contains("nichts eingetragen"), "{e}");
+        let r = code_between("Cmd::Receive { key, owner, ghost } => {", "Cmd::Utxos { address } => {");
+        assert!(
+            r.contains("letl=store::lock(&ctx.state_path,Duration::from_secs(10))?;") && r.contains("receive_resolve(store::resolve_pending(&ctx.net,&ctx.state_path).await)?;d=ctx.load()?;Some(l)"),
+            "{r}"
+        );
+    }
+
+    /// A20c-1: Adressen und Eingaben vor der Verbindung zum Node prüfen
+    #[test]
+    fn a20c_1_eingaben_vor_der_verbindung() {
+        let p = kaspa_addresses::Prefix::Mainnet;
+        let good = kaspa_lending_protocol::wallet::address_of_xonly(&xonly(&new_key()), p);
+        // Prüfsumme kaputt: letztes Zeichen tauschen
+        let mut bad = good.clone();
+        let last = bad.pop().unwrap();
+        bad.push(if last == 'q' { 'p' } else { 'q' });
+        let build = |action: &str, address: &str, to: Option<&str>| WalletCmd::Build {
+            action: action.into(),
+            address: address.into(),
+            vault: None,
+            vault_id: None,
+            kas: Some(1.0),
+            ghost: None,
+            keep: None,
+            to: to.map(Into::into),
+            message: None,
+            onchain_message: false,
+            min: None,
+            min_shares: None,
+            percent: None,
+            min_kas: None,
+            min_ghost: None,
+            amount: None,
+            interval: None,
+            start: None,
+            time: None,
+            count: None,
+            fund: None,
+            max_fee: None,
+            tresor: None,
+        };
+        assert!(wallet_build_precheck(p, &build("send", &good, Some(&good))).is_ok());
+        assert!(wallet_build_precheck(p, &build("send", &bad, Some(&good))).unwrap_err().contains("keine gültige Kaspa-Adresse"));
+        assert!(wallet_build_precheck(p, &build("send", &format!("kaspa:q{}", "q".repeat(60)), None)).is_err(), "Fall aus dem Bericht");
+        assert!(wallet_build_precheck(p, &build("send", &good, Some(&bad))).unwrap_err().contains("--to"));
+        let test_addr = kaspa_lending_protocol::wallet::address_of_xonly(&xonly(&new_key()), kaspa_addresses::Prefix::Testnet);
+        assert!(wallet_build_precheck(p, &build("send", &test_addr, None)).unwrap_err().contains("anderen Netz"));
+        assert!(wallet_build_precheck(p, &build("tresor-cancel", &bad, None)).is_err(), "auch Tresor-Aktionen");
+        assert!(wallet_build_precheck(p, &build("rm -rf", &good, None)).unwrap_err().contains("unbekannte Aktion"));
+        let mut c = build("mint", &good, None);
+        if let WalletCmd::Build { kas, vault_id, .. } = &mut c {
+            *kas = Some(-1.0);
+            *vault_id = Some("zz".into());
+        }
+        assert!(wallet_build_precheck(p, &c).is_err());
+        // öffentliche Befehle
+        let utxos = |a: &str| Cmd::Utxos { address: vec![good.clone(), a.to_string()] };
+        assert!(public_precheck(&utxos(&good), "mainnet").is_ok());
+        assert!(public_precheck(&utxos(&bad), "mainnet").is_err());
+        assert!(public_precheck(&Cmd::Receive { key: None, owner: Some(bad.clone()), ghost: 1.0 }, "mainnet").is_err());
+        assert!(public_precheck(&Cmd::Receive { key: None, owner: Some(good.clone()), ghost: f64::NAN }, "mainnet").is_err());
+        assert!(public_precheck(&Cmd::Receive { key: None, owner: Some(good.clone()), ghost: 1.0 }, "mainnet").is_ok());
+        // Verdrahtung: vor Net::connect
+        let head = code_between("async fn wallet_action_cmd(", "let net = Net::connect(network, rpc).await?;");
+        assert!(head.contains("ifletWalletCmd::Build{..}=cmd{wallet_build_precheck("), "{head}");
+        let run = code_between("async fn run(cli: Cli)", "let net = Net::connect(&cli.network, cli.rpc.as_deref()).await?;");
+        assert!(run.contains("public_precheck(&cli.cmd,&cli.network)?;"), "{run}");
+    }
+
+    /// A20c-1 im Ablauf: eine ungültige Adresse scheitert sofort, ohne den
+    /// (hier unerreichbaren) Node zu fragen
+    #[tokio::test]
+    async fn a20c_1_ungueltige_adresse_ohne_node() {
+        let dir = std::env::temp_dir().join(format!("ghost-a20c1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("mainnet.json");
+        let cmd = WalletCmd::Build {
+            action: "send".into(),
+            address: format!("kaspa:q{}", "q".repeat(60)),
+            vault: None,
+            vault_id: None,
+            kas: Some(1.0),
+            ghost: None,
+            keep: None,
+            to: None,
+            message: None,
+            onchain_message: false,
+            min: None,
+            min_shares: None,
+            percent: None,
+            min_kas: None,
+            min_ghost: None,
+            amount: None,
+            interval: None,
+            start: None,
+            time: None,
+            count: None,
+            fund: None,
+            max_fee: None,
+            tresor: None,
+        };
+        let t = std::time::Instant::now();
+        let e = wallet_action_cmd("mainnet", Some("ws://127.0.0.1:9"), &state, false, &cmd).await.unwrap_err();
+        assert!(e.contains("keine gültige Kaspa-Adresse"), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

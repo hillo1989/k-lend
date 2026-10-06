@@ -629,6 +629,45 @@ fn vorpruefung_ohne_netz_weist_muell_signaturen_ab() {
     assert!(wo::precheck(&plan, &good, "testnet-10", P).is_err());
 }
 
+/// Audit 20 A20b-4: aufgeblasene Pläne (Signer-Einträge doppelt, mehr als
+/// Eingänge, viele Ausgänge) scheitern an der Form, bevor ein Sighash
+/// gerechnet wird – in Mikrosekunden statt 0,8 s
+#[test]
+fn a20b_4_aufgeblasener_plan_scheitert_vor_der_signaturpruefung() {
+    let (_w, u, plan) = mint_setup();
+    let good = w::parse_signed(&kasware_sign(&plan, &u, SIG_HASH_ALL)).unwrap();
+    assert_eq!(wo::precheck(&plan, &good, NET, P).unwrap().error, None);
+    // derselbe Eingang 5 000-mal
+    let mut big = plan.clone();
+    let first = big.signers[0].clone();
+    big.signers = vec![first.clone(); 5_000];
+    let t = std::time::Instant::now();
+    let e = wo::precheck(&big, &good, NET, P).unwrap_err();
+    assert!(e.contains("zu signierende Eingänge"), "{e}");
+    assert!(t.elapsed() < std::time::Duration::from_millis(50), "{:?}", t.elapsed());
+    // doppelt, aber nicht mehr als Eingänge
+    let mut dup = plan.clone();
+    dup.signers = vec![first.clone(), first.clone()];
+    assert!(wo::precheck(&dup, &good, NET, P).unwrap_err().contains("mehrfach"));
+    // Index außerhalb
+    let mut out = plan.clone();
+    out.signers[0].index = 99;
+    assert!(wo::precheck(&out, &good, NET, P).unwrap_err().contains("gibt es nicht"));
+    // 700 zusätzliche Ausgänge im Plan
+    let mut wide = plan.clone();
+    let (mut tx, e) = w::from_safe(&wide.tx).unwrap();
+    let o = tx.outputs[0].clone();
+    tx.outputs.extend(std::iter::repeat_n(o, 700));
+    wide.tx = w::to_safe(&tx, &e, P);
+    assert!(wo::precheck(&wide, &good, NET, P).unwrap_err().contains("Ausgänge"));
+    // Wallet-Antwort mit anderer Zahl von Ausgängen: Bericht, kein Sighash
+    let (mut stx, se) = w::from_safe(&good).unwrap();
+    let o = stx.outputs[0].clone();
+    stx.outputs.push(o);
+    let rep = wo::precheck(&plan, &w::to_safe(&stx, &se, P), NET, P).unwrap();
+    assert!(rep.error.unwrap().contains("verändert"));
+}
+
 /// Ausgänge beim Namen: Vault eröffnen, prägen, tilgen (Anzeige vor dem Signieren)
 #[test]
 fn ausgaenge_werden_beim_namen_genannt() {

@@ -37,12 +37,16 @@ const WAIT: u64 = 36_000;
 impl World {
     /// 3-von-5-Satz, Zinsschritt wie im echten Deployment (0,5 Punkte, 1 h)
     fn new() -> Self {
+        Self::with_set(5, 3, 4)
+    }
+    /// Satz mit `n` Schlüsseln, Preis-Schwelle `t`, Austausch-Schwelle `t_rot`
+    fn with_set(n: usize, t: i64, t_rot: i64) -> Self {
         let mut sim = Sim::new();
         let deployer = key();
-        let committee: Vec<Keypair> = (0..5).map(|_| key()).collect();
+        let committee: Vec<Keypair> = (0..n).map(|_| key()).collect();
         sim.faucet(&deployer, 1_000 * E8 as u64);
         let net = sim.params.clone();
-        let set = SignerSet { keys: committee.iter().map(xonly).collect(), t: 3, t_rot: 4 };
+        let set = SignerSet { keys: committee.iter().map(xonly).collect(), t, t_rot };
         let feed = sim.deploy_feed_with(&deployer, test_register_params(&deployer), set, 4_000_000, 0, (634_195_839, 15_854_897, WAIT as i64)).expect("Register und Orakel");
         let fp = FactoryParams { deployer: xonly(&deployer), ghost_tpl: ghost_template() };
         let (b, factory) = ops::deploy_factory(&fp, 100_000_000, &sim.funds(&deployer), &net).unwrap();
@@ -78,7 +82,7 @@ impl World {
     }
     fn price(&mut self, kas_usd: i64) {
         self.sim.advance(700);
-        let r = self.update(&self.committee[..3].to_vec(), kas_usd, self.dep.oracle.state.stable_rate);
+        let r = self.update(&self.committee[..3.min(self.committee.len())].to_vec(), kas_usd, self.dep.oracle.state.stable_rate);
         self.apply("Preis-Update", r);
     }
     fn funds(&self) -> ops::Funds {
@@ -270,8 +274,14 @@ fn notfallweg_nur_nach_stille_und_verfaellt_durch_preis() {
     let rescue_set = SignerSet { keys: vec![xonly(&rescue)], t: 1, t_rot: 1 };
     let e = ops::propose(&w.dep, &ops::signers_of(&fb_set, &fb), &rescue_set, None, true, w.sim.daa - 1, &w.funds(), &net).err().unwrap();
     assert!(e.contains("Notfallweg erst ab"), "{e}");
-    // 3. nach der Stille: Notfall-Ankündigung, ein Preis-Update entwertet sie
+    // 3. nach der Stille, aber Orakel nicht eingefroren: abgelehnt (A20a-1)
     w.sim.advance(WAIT + 10);
+    let e = ops::propose(&w.dep, &ops::signers_of(&fb_set, &fb), &rescue_set, None, true, w.sim.daa - 1, &w.funds(), &net).err().unwrap();
+    assert!(e.contains("eingefroren"), "{e}");
+    // eingefroren: Notfall-Ankündigung, ein Preis-Update entwertet sie
+    w.sim.advance(w.dep.oracle_params.freeze_after_daa as u64);
+    let r = ops::oracle_freeze(&w.dep, w.sim.daa - 1, &w.funds(), &net);
+    w.apply("Einfrieren", r);
     let r = ops::propose(&w.dep, &ops::signers_of(&fb_set, &fb), &rescue_set, None, true, w.sim.daa - 1, &w.funds(), &net);
     w.apply("Notfall-Ankündigung", r);
     assert!(w.dep.register.state.emerg);
@@ -279,7 +289,9 @@ fn notfallweg_nur_nach_stille_und_verfaellt_durch_preis() {
     assert!(w.dep.rotation.is_none(), "Preis-Update entwertet das Notfall-Ticket");
     assert!(!w.dep.register.state.emerg);
     // 4. wieder Stille, diesmal bleibt der Hauptsatz still
-    w.sim.advance(WAIT + 10);
+    w.sim.advance(w.dep.oracle_params.freeze_after_daa as u64 + 10);
+    let r = ops::oracle_freeze(&w.dep, w.sim.daa - 1, &w.funds(), &net);
+    w.apply("Einfrieren 2", r);
     let r = ops::propose(&w.dep, &ops::signers_of(&fb_set, &fb), &rescue_set, None, true, w.sim.daa - 1, &w.funds(), &net);
     w.apply("Notfall-Ankündigung 2", r);
     w.sim.advance(WAIT + 10);
@@ -471,4 +483,113 @@ fn abgleich_absage_und_verfallener_notfall() {
     let notes = reconcile_register(&mut d, &before);
     assert!(d.foreign_change.is_none(), "{notes:?}");
     assert!(notes.iter().any(|n| n.contains("verfallen")));
+}
+
+/// Audit 20, Notfallsatz (Entscheidung des Betreibers) und A20a-1: der ganze
+/// Weg von GHOST-Notfallsatz.command mit dem Live-Aufbau (1 von 1, kein
+/// Notfallsatz). Ankündigung „gleicher Hauptsatz + neuer Notfallsatz“, vom
+/// bisherigen Unterzeichner signiert → Wartezeit (zu früh lehnt die Kette ab)
+/// → Aktivieren → Hauptsatz setzt weiter Preise (auch ein Rechner, der die
+/// Ankündigung nicht kennt, wie der Server) → Notfallweg nur nach Stille UND
+/// bei eingefrorenem Orakel → nach der Notfall-Wartezeit übernimmt der
+/// Rettungssatz.
+#[test]
+fn a20_notfallsatz_nachtragen_und_notfallweg() {
+    use kaspa_lending_protocol::store::reconcile_register;
+    let mut w = World::with_set(1, 1, 1);
+    let net = w.sim.params.clone();
+    let main = w.committee[0];
+    let server = w.dep.clone();
+    assert_eq!(w.dep.fallback_set, None);
+    assert_eq!(w.dep.register.state.fb_hash, vec![0u8; 32], "wie live: kein Notfallsatz");
+
+    // 1. Notfall-Schlüssel (committee-keygen --count 1) und Ankündigung mit
+    //    unverändertem Hauptsatz (signers propose --same-set --fallback-keys …)
+    let cold = key();
+    let fb_set = SignerSet { keys: vec![xonly(&cold)], t: 1, t_rot: 1 };
+    let same = w.dep.signer_set.clone();
+    // der Notfall-Schlüssel allein kann nichts ankündigen
+    assert!(ops::propose(&w.dep, &ops::signers_of(&same, &[cold]), &same, Some(&fb_set), false, w.sim.daa - 1, &w.funds(), &net).is_err());
+    let r = ops::propose(&w.dep, &ops::signers_of(&same, &[main]), &same, Some(&fb_set), false, w.sim.daa - 1, &w.funds(), &net);
+    w.apply("Notfallsatz ankündigen", r);
+    let rot = w.dep.rotation.clone().expect("Ankündigung offen");
+    assert_eq!(rot.set, same);
+    assert_eq!(rot.fallback.as_ref(), Some(&fb_set));
+
+    // 2. Preis-Updates laufen während der Wartezeit weiter (der Agent) – ein
+    //    reguläres Ticket verfällt dadurch nicht
+    w.price(4_050_000);
+    assert!(w.dep.rotation.is_some(), "reguläre Ankündigung bleibt");
+    // zu früh: die Kette lehnt ab
+    let (b, _) = ops::activate_rotation(&w.dep, &w.funds(), &net).expect("baut");
+    assert!(w.sim.submit(&b).is_err(), "Aktivieren vor Ablauf der Wartezeit");
+
+    // 3. nach der Wartezeit aktivieren (darf jeder – hier ein Dritter): die
+    //    Datei des Ankündigenden übernimmt den Notfallsatz beim Abgleich, obwohl
+    //    der Satz gleich bleibt (vorher galt die Ankündigung dann als abgesagt)
+    w.sim.advance(WAIT + 700);
+    let stranger = key();
+    w.sim.faucet(&stranger, 10 * E8 as u64);
+    let (b, act) = ops::activate_rotation(&w.dep, &w.sim.funds(&stranger), &net).expect("baut");
+    w.sim.submit(&b).expect("Notfallsatz aktivieren");
+    let before = w.dep.register.state.clone();
+    w.dep.register = act.register.clone();
+    let notes = reconcile_register(&mut w.dep, &before);
+    assert!(notes.iter().any(|n| n.contains("aktiviert")), "{notes:?}");
+    assert!(w.dep.rotation.is_none() && w.dep.old_tickets.is_empty() && w.dep.foreign_change.is_none(), "{notes:?}");
+    assert_eq!(w.dep.signer_set, same, "Hauptsatz unverändert");
+    assert_eq!(w.dep.fallback_set.as_ref(), Some(&fb_set));
+    assert_eq!(w.dep.register.state.fb_hash, fb_set.hash().to_vec());
+
+    // 4. Hauptsatz setzt weiter Preise; ein Rechner ohne die Ankündigung
+    //    (Server-Datei) führt das Register nach und kann ebenfalls updaten
+    w.price(4_100_000);
+    let mut srv = server.clone();
+    let before = srv.register.state.clone();
+    srv.register = w.dep.register.clone();
+    srv.oracle = w.dep.oracle.clone();
+    let notes = reconcile_register(&mut srv, &before);
+    assert!(!srv.signers_unknown, "Hauptsatz bekannt: {notes:?}");
+    w.sim.advance(700);
+    let (b, d) = ops::oracle_update(&srv, &ops::signers_of(&srv.signer_set, &[main]), 4_150_000, srv.oracle.state.stable_rate, w.sim.daa - 1, &w.funds(), &net).expect("Server-Stand baut");
+    w.sim.submit(&b).expect("Preis-Update vom Server-Stand");
+    assert_eq!(d.fallback_set, None, "der Server kennt nur den Hash des Notfallsatzes");
+    // der Mac (dessen Datei die Ankündigung kennt) führt weiter
+    let fb_known = w.dep.fallback_set.clone();
+    w.dep = d;
+    w.dep.fallback_set = fb_known;
+
+    // 5. Notfallweg: nicht ohne Stille, nicht ohne Einfrieren (A20a-1)
+    let rescue = key();
+    let rescue_set = SignerSet { keys: vec![xonly(&rescue)], t: 1, t_rot: 1 };
+    let cold_signers = ops::signers_of(&fb_set, &[cold]);
+    let e = ops::propose(&w.dep, &cold_signers, &rescue_set, None, true, w.sim.daa - 1, &w.funds(), &net).err().unwrap();
+    assert!(e.contains("Notfallweg erst ab"), "{e}");
+    w.sim.advance(WAIT + 10);
+    let e = ops::propose(&w.dep, &cold_signers, &rescue_set, None, true, w.sim.daa - 1, &w.funds(), &net).err().unwrap();
+    assert!(e.contains("eingefroren"), "Stille allein reicht nicht: {e}");
+    // Gegenprobe: nur das Einfrieren fehlt – mit eingefrorenem Orakel baut sie
+    // (das Register selbst prüft das Orakel nicht, deshalb prüft es ops::propose)
+    let mut unchecked = w.dep.clone();
+    unchecked.oracle.state.frozen = true;
+    let (b, _) = ops::propose(&unchecked, &cold_signers, &rescue_set, None, true, w.sim.daa - 1, &w.funds(), &net).unwrap_or_else(|e| panic!("ohne Prüfung: {e}"));
+    assert!(!b.tx.inputs.is_empty());
+    w.sim.advance(w.dep.oracle_params.freeze_after_daa as u64);
+    let r = ops::oracle_freeze(&w.dep, w.sim.daa - 1, &w.funds(), &net);
+    w.apply("Einfrieren nach der Stille", r);
+    let r = ops::propose(&w.dep, &cold_signers, &rescue_set, None, true, w.sim.daa - 1, &w.funds(), &net);
+    w.apply("Notfall-Ankündigung", r);
+    assert!(w.dep.register.state.emerg);
+    // das eingefrorene Orakel kann nur ein echtes Update des Hauptsatzes auftauen;
+    // ohne das läuft die Notfall-Wartezeit ab
+    w.sim.advance(WAIT + 700);
+    let r = ops::activate_rotation(&w.dep, &w.funds(), &net);
+    w.apply("Rettungssatz aktivieren", r);
+    assert_eq!(w.dep.signer_set, rescue_set);
+    // der alte Hauptsatz kann keine Preise mehr setzen, der Rettungssatz schon
+    w.sim.advance(700);
+    assert!(w.update(&[main], 4_000_000, w.dep.oracle.state.stable_rate).is_err());
+    let r = w.update(&[rescue], 4_000_000, w.dep.oracle.state.stable_rate);
+    w.apply("Rettungssatz setzt Preise", r);
+    assert!(!w.dep.oracle.state.frozen, "Preis taut auf");
 }

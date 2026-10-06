@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { indexToUnits, kasUsdToUnits, oracleStale, pctToBps, xOnlyKey } from "./status";
+import { ORACLE_STALE_MINUTES, oracleStaleMinutes } from "../config";
 
 describe("xOnlyKey", () => {
   const x = "d64cbe281ed8bc5d22e521ce4534de0a176b6f5dd1d43762faf0a9e2fe90af6a";
@@ -29,6 +30,25 @@ describe("oracleStale", () => {
   const base = { covenantId: "", kasUsd: 0.05, seq: 1, ratePctYear: 5, index: 1, freshError: null };
   it("frisch und jung", () => expect(oracleStale({ ...base, fresh: true, ageMinutes: 17 })).toBe(false));
   it("älter als 6,5 h", () => expect(oracleStale({ ...base, fresh: true, ageMinutes: 391 })).toBe(true));
-  it("5 h ist noch frisch (Dauerbetrieb aktualisiert spätestens nach 6 h)", () => expect(oracleStale({ ...base, fresh: true, ageMinutes: 300 })).toBe(false));
+  // Audit 20 A20d-3: Version 4 friert nach 2 h ein, der Agent aktualisiert nach 60 min.
+  // Die frühere Erwartung „5 h ist noch frisch“ (Version 3, Update spätestens nach 6 h) gilt nicht mehr.
+  it("5 h ist veraltet (Version 4: einfrierbar nach 2 h)", () => expect(oracleStale({ ...base, fresh: true, ageMinutes: 300 })).toBe(true));
+  it("70 min noch frisch, 76 min veraltet (Herzschlag nach 60 min + 15 min)", () => {
+    expect(oracleStale({ ...base, fresh: true, ageMinutes: 70 })).toBe(false);
+    expect(oracleStale({ ...base, fresh: true, ageMinutes: 76 })).toBe(true);
+  });
+  it("Live-Frist aus dem Status: 4 h Einfrieren → veraltet ab 135 min", () => {
+    expect(oracleStaleMinutes(4)).toBe(135);
+    expect(oracleStale({ ...base, fresh: true, ageMinutes: 100 }, 4)).toBe(false);
+    expect(oracleStale({ ...base, fresh: true, ageMinutes: 140 }, 4)).toBe(true);
+    expect(oracleStaleMinutes(2)).toBe(75);
+    expect(ORACLE_STALE_MINUTES).toBe(75);
+    expect(oracleStaleMinutes(0.5)).toBe(15); // kurze Frist: 15 min vor dem Einfrieren
+  });
+  it("eingefroren oder Frist abgelaufen gilt immer als veraltet", () => {
+    expect(oracleStale({ ...base, fresh: true, ageMinutes: 5, frozen: true })).toBe(true);
+    expect(oracleStale({ ...base, fresh: true, ageMinutes: 5, freezeInMinutes: -1 })).toBe(true);
+    expect(oracleStale({ ...base, fresh: true, ageMinutes: 5, freezeInMinutes: 115 })).toBe(false);
+  });
   it("von ghostctl als nicht frisch gemeldet", () => expect(oracleStale({ ...base, fresh: false, ageMinutes: 1 })).toBe(true));
 });

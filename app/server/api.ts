@@ -35,7 +35,10 @@
 // /api/wallet/…; alles andere 403 (publicRouteAllowed in actions.ts). Dazu
 // höchstens 2 ghostctl-Prozesse für Lesendes und eigene 2 für die
 // Wallet-Routen (Audit 17 A17-4: Wallet-Aufrufe verdrängen Status und Preis
-// nicht), höchstens 2 submit gleichzeitig, davon 1 mit Senden; 60 s
+// nicht), einen eigenen für Namensauflösung und GHOST-Suche (A20c-4),
+// höchstens 2 submit gleichzeitig, davon 1 mit Senden; wallet build je
+// Absender höchstens 6 je Minute und nie zwei gleichzeitig, insgesamt höchstens
+// 30 je Minute (A20c-1: ein Absender belegt die Wallet-Plätze nicht); 60 s
 // Zeitlimit zum Lesen, 170 s zum Senden (unter den 180 s des Webservers,
 // A17-7); kein Abo-Takt. Fehlermeldungen ohne absolute Pfade (A17-8).
 import { createHash } from "node:crypto";
@@ -141,6 +144,14 @@ export interface GhostApiOptions {
   maxSends?: number;
   /** Zeitlimit für submit mit Senden (Standard WALLET_SEND_TIMEOUT_MS) */
   walletSendTimeoutMs?: number;
+  /** /api/wallet/build: höchstens so viele je Absender und Minute (öffentlich 6) – A20c-1 */
+  buildPerMinute?: number;
+  /** /api/wallet/build: höchstens so viele insgesamt je Minute (öffentlich 30) – A20c-1 */
+  buildsPerMinute?: number;
+  /** /api/wallet/name: höchstens so viele je Absender und Minute (öffentlich 30, eigenes Kontingent) */
+  namePerMinute?: number;
+  /** ghostctl-Plätze für Namensauflösung und GHOST-Suche (öffentlich 1) – A20c-4 */
+  lookupMaxProcs?: number;
 }
 
 /**
@@ -162,6 +173,15 @@ function redactJson(v: unknown, key = ""): unknown {
 
 /** Ergebnis, wenn zu viele ghostctl-Aufrufe warten */
 const BUSY_RESULT: RunResult = { code: -1, stdout: "", stderr: "Server ausgelastet – bitte gleich erneut versuchen.", timedOut: false };
+const BUSY_TEXT = BUSY_RESULT.stderr;
+
+/**
+ * Antwort „ausgelastet“ (voller Pool): kein Ergebnis, das ein Lese-Cache
+ * merken darf (A20c-4) – sonst sähen alle Besucher sie 20 s lang.
+ */
+export function isBusyBody(body: string): boolean {
+  return body.includes('"busy":true');
+}
 
 export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
   const isPublic = opts.public ?? process.env.GHOST_PUBLIC === "1";
@@ -194,6 +214,9 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
   }
   const run = createPool(maxProcs);
   const runWallet = createPool(opts.walletMaxProcs ?? (isPublic ? 2 : Infinity));
+  // Namensauflösung (.k → ghostctl utxos) und GHOST-Suche (receive) haben
+  // eigene Plätze: sie verdrängen weder status/price noch build/submit (A20c-4)
+  const runLookup = createPool(opts.lookupMaxProcs ?? (isPublic ? 1 : Infinity));
   const maxSubmits = opts.maxSubmits ?? (isPublic ? 2 : Infinity);
   const maxSends = opts.maxSends ?? (isPublic ? 1 : Infinity);
   const walletSendTimeout = opts.walletSendTimeoutMs ?? WALLET_SEND_TIMEOUT_MS;
@@ -275,6 +298,8 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
           inflight.set(n, f);
         }
         const body = await f.p;
+        // „ausgelastet“ ist kein Ergebnis: nicht merken, der nächste Abruf versucht es neu (A20c-4)
+        if (isBusyBody(body)) return body;
         // Nodes nicht erreichbar: länger merken, jeder Versuch dauert sonst 1–2 Minuten
         if (f.gen === gen)
           store.set(n, { at: Date.now(), body, ttl: body.includes('"nodeDown":true') || body.includes('"offline":true') ? NODE_DOWN_CACHE_MS : ttl });
@@ -301,6 +326,7 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
   // nicht jede Anfrage erneut 1–2 Minuten auf Zeitüberschreitungen wartet.
   const readJson = async (args: string[], what: string) => {
     const r = await run(args, readTimeout);
+    if (r === BUSY_RESULT) return JSON.stringify({ ok: false, busy: true, error: BUSY_TEXT });
     if (r.timedOut) return errorBody(`${what}: Zeitüberschreitung (Nodes antworten nicht)`);
     const j = parseJson(r.stdout);
     if (!j) return errorBody(`${what} fehlgeschlagen: ${tail(r.stderr) || "keine Ausgabe"}`);
@@ -328,6 +354,33 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
   // Wallet-Routen: viele Besucher, deshalb kein globales „busy“, sondern
   // Ratenbegrenzung je Absender plus die Prozessbegrenzung von run()
   const walletLimiter = createRateLimiter(opts.walletPerMinute ?? (isPublic ? 20 : 120));
+  // A20c-1: wallet build kostet je Aufruf einen Wallet-Platz für 11–13 s
+  // (ghostctl verbindet sich mit dem Node). Je Absender höchstens
+  // buildPerMinute und nie zwei gleichzeitig, insgesamt höchstens
+  // buildsPerMinute – so belegt kein Absender beide Plätze dauerhaft.
+  const buildLimiter = createRateLimiter(opts.buildPerMinute ?? (isPublic ? 6 : 120));
+  const buildsLimiter = createRateLimiter(opts.buildsPerMinute ?? (isPublic ? 30 : 600));
+  // .k-Namen: eigenes Kontingent, damit Tippen nicht das von build/submit aufbraucht (A20d-10)
+  const nameLimiter = createRateLimiter(opts.namePerMinute ?? (isPublic ? 30 : 240));
+  /** laufende ghostctl-Aufrufe der Wallet-Plätze je Absender (build, tresore) */
+  const walletActive = new Map<string, number>();
+  async function oneAtATime<T>(sender: string, f: () => Promise<T>): Promise<T | null> {
+    if ((walletActive.get(sender) ?? 0) >= 1) return null;
+    walletActive.set(sender, 1);
+    try {
+      return await f();
+    } finally {
+      walletActive.delete(sender);
+    }
+  }
+  const tooMany = (res: ServerResponse, wait: number) => {
+    res.setHeader("Retry-After", String(wait));
+    return send(res, 429, { ok: false, error: `Zu viele Anfragen – bitte in ${wait} s erneut versuchen.` });
+  };
+  const stillRunning = (res: ServerResponse) => {
+    res.setHeader("Retry-After", "5");
+    return send(res, 429, { ok: false, busy: true, error: "Deine vorige Anfrage läuft noch – bitte kurz warten. Es wurde nichts gesendet." });
+  };
   // Audit 18 G-3: Sendungen insgesamt begrenzen (unabhängig vom Absender) und
   // endgültig abgewiesene Pläne einige Minuten sofort ablehnen, damit ein alter,
   // gültig signierter Plan den Sende-Platz nicht immer wieder belegt
@@ -567,17 +620,15 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
 
         case "GET /api/wallet/name": {
           // .k-Name → Adresse, am eigenen Node nachgeprüft (sendet nichts)
-          const wait = walletLimiter.take(clientKey(req.socket.remoteAddress, h["x-forwarded-for"], trusted));
-          if (wait !== null) {
-            res.setHeader("Retry-After", String(wait));
-            return send(res, 429, { ok: false, error: `Zu viele Anfragen – bitte in ${wait} s erneut versuchen.` });
-          }
+          const wait = nameLimiter.take(clientKey(req.socket.remoteAddress, h["x-forwarded-for"], trusted));
+          if (wait !== null) return tooMany(res, wait);
           const network = url.searchParams.get("network") ?? "mainnet";
           if (!isNetwork(network)) throw new ValidationError("Unbekanntes Netz.");
           const utxos = async (net: typeof network, addresses: string[]) => {
             if (addresses.length === 0) return [];
             if (addresses.length > 50) throw new Error("zu viele Adressen");
-            const r = await run(["--network", net, "--json", "utxos", ...addresses.flatMap((a) => ["--address", a])], readTimeout);
+            const r = await runLookup(["--network", net, "--json", "utxos", ...addresses.flatMap((a) => ["--address", a])], readTimeout);
+            if (r === BUSY_RESULT) throw new Error(BUSY_TEXT);
             const j = parseJson(r.stdout);
             if (!j || j.ok === false || !Array.isArray(j.utxos)) throw new Error("Node nicht erreichbar");
             return j.utxos as { address: string; covenantId?: string | null; transactionId?: string; index?: number; daaScore?: number }[];
@@ -597,7 +648,8 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
           if (busy) return send(res, 409, { ok: false, error: "Es läuft bereits eine Aktion – bitte gleich erneut versuchen." });
           busy = true;
           try {
-            const r = await run(args, readTimeout);
+            const r = await runLookup(args, readTimeout);
+            if (r === BUSY_RESULT) return send(res, 503, { ok: false, busy: true, error: BUSY_TEXT });
             statusCache.clear();
             const j = parseJson(r.stdout);
             if (!j) {
@@ -620,8 +672,11 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
             res.setHeader("Retry-After", String(wait));
             return send(res, 429, { ok: false, error: `Zu viele Anfragen – bitte in ${wait} s erneut versuchen.` });
           }
+          const sender = clientKey(req.socket.remoteAddress, h["x-forwarded-for"], trusted);
           const args = buildWalletTresoreArgs(url.searchParams.get("network") ?? undefined, url.searchParams.get("owner"));
-          const r = await runWallet(args, readTimeout);
+          const r = await oneAtATime(sender, () => runWallet(args, readTimeout));
+          if (r === null) return stillRunning(res);
+          if (r === BUSY_RESULT) return send(res, 503, { ok: false, busy: true, error: BUSY_TEXT });
           if (r.timedOut) return send(res, 200, { ok: false, timeout: true, error: "Zeitüberschreitung." });
           const j = parseJson(r.stdout);
           if (!j) return send(res, 200, { ok: false, error: `ghostctl tresor owned: ${tail(r.stderr) || "keine Ausgabe"}` });
@@ -630,15 +685,23 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
 
         case "POST /api/wallet/build":
         case "POST /api/wallet/submit": {
-          const wait = walletLimiter.take(clientKey(req.socket.remoteAddress, h["x-forwarded-for"], trusted));
-          if (wait !== null) {
-            res.setHeader("Retry-After", String(wait));
-            return send(res, 429, { ok: false, error: `Zu viele Anfragen – bitte in ${wait} s erneut versuchen.` });
-          }
+          const sender = clientKey(req.socket.remoteAddress, h["x-forwarded-for"], trusted);
+          const isBuild = url.pathname === "/api/wallet/build";
+          const wait = walletLimiter.take(sender) ?? (isBuild ? buildLimiter.take(sender) : null);
+          if (wait !== null) return tooMany(res, wait);
           const body = (await readBody(req, WALLET_BODY_LIMIT)) as Record<string, unknown> | null;
-          if (url.pathname === "/api/wallet/build") {
+          if (isBuild) {
+            // erst vollständig prüfen (Adresse mit Prüfsumme), dann Kontingente – Ungültiges kostet keinen Platz
             const { args } = buildWalletBuildArgs(body ?? {});
-            const r = await runWallet(args, readTimeout);
+            if ((walletActive.get(sender) ?? 0) >= 1) return stillRunning(res);
+            const all = buildsLimiter.take("alle");
+            if (all !== null) {
+              res.setHeader("Retry-After", String(all));
+              return send(res, 503, { ok: false, busy: true, error: "Gerade werden sehr viele Pläne gebaut – bitte gleich erneut versuchen. Es wurde nichts gesendet." });
+            }
+            const r = await oneAtATime(sender, () => runWallet(args, readTimeout));
+            if (r === null) return stillRunning(res);
+            if (r === BUSY_RESULT) return send(res, 503, { ok: false, busy: true, error: BUSY_TEXT });
             if (r.timedOut) return send(res, 200, { ok: false, timeout: true, error: "Zeitüberschreitung (Nodes antworten nicht)." });
             const j = parseJson(r.stdout);
             if (!j) {
@@ -679,6 +742,11 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
             }
             const args = call.args.map((a) => paths[a] ?? a);
             const r = await runWallet(args, call.sends ? walletSendTimeout : readTimeout);
+            // Warteschlange voll: ghostctl lief nie, also sicher nichts gesendet (nicht „unklar“)
+            if (r === BUSY_RESULT) {
+              res.setHeader("Retry-After", "10");
+              return send(res, 503, { ok: false, busy: true, error: `${BUSY_TEXT} Es wurde nichts gesendet.` });
+            }
             if (call.sends) {
               statusCache.clear();
               keysCache.clear();

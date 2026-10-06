@@ -1,0 +1,142 @@
+pragma silverscript ^0.1.0; // Sprachversion des Compilers v1.0.0 ist 0.1.0 (compiler/mod.rs:55)
+
+// PriceOracleV5 — Preis und Zinsindex für GHOST v5 (docs/v5-entwurf.md).
+//
+// Wie price_oracle_v4.sil (keine Signaturprüfung, das Register
+// signer_register_v5.sil prüft das Quorum und den Ausgang), dazu zwei
+// Änderungen gegen einen gestohlenen Unterzeichner-Schlüssel (Audit 20, A20e-1):
+//
+//   1. Sprunggrenze je Update als Template-Konstante jumpBps: der neue Preis
+//      liegt zwischen kasUsd/(1 + j) und kasUsd·(1 + j), j = jumpBps/1e4
+//      (v4: fest ×2/÷2, entspricht jumpBps = 10 000).
+//   2. Referenzpreis refKasUsd: ein Preis, der seit mindestens refAfter
+//      Updates öffentlich auf der Kette steht. Das Register lässt ein Update
+//      erst zu, wenn seine Haupt-UTXO mindestens minGapDaa alt ist (relative
+//      Sperre, this.ageDaa) – auch bei DAA-Rückstand des Orakels. Darum ist der
+//      Referenzpreis mindestens refAfter · minGapDaa Kettenzeit alt. Vault v5
+//      und Pool v5 verlangen ihre Regeln zu BEIDEN Preisen (Zwei-Preis-Regel):
+//      Ein gefälschter Preis bewegt erst Geld, wenn er auch Referenzpreis
+//      geworden ist. In dieser Zeit kann der Wächter das Register sperren.
+//
+// Referenz-Fortschreibung bei jedem Update (Zähler seq):
+//   seq + 1 − candSeq ≥ refAfter  →  refKasUsd = candKasUsd,
+//                                    candKasUsd = neuer Preis, candSeq = seq + 1
+//   sonst bleiben refKasUsd, candKasUsd, candSeq stehen.
+// Ein Kandidat wird also frühestens refAfter Updates nach seiner
+// Veröffentlichung Referenz; der Referenzpreis ist zwischen refAfter und
+// 2·refAfter − 1 Updates alt.
+//
+// read und freeze prüfen das Register nicht (wie v4): attestPrice liest den
+// Orakel-Eingang und verlangt seq + 1 und frozen = false im Ausgang (Audit 20
+// A20a-1), alle anderen Register-Einträge verbieten den Orakel-Eingang.
+//
+// Einheiten wie v4:
+//   kasUsd, refKasUsd, candKasUsd  USD je KAS × 1e8
+//   oracleDaa   DAA-Score des Preises
+//   stableRate  Zins je DAA × 1e18
+//   stableIndex Schuldindex × 1e9
+//   lastRateDaa oracleDaa der letzten Zinsänderung
+contract PriceOracleV5(
+    byte[32] regCovId,
+    int maxRate,          // Obergrenze des Zinssatzes (Vorschlag 20 %/Jahr = 634_195_839)
+    int rateStep,         // größter Zinsschritt je Änderung (Vorschlag 0,5 Punkte = 15_854_896)
+    int rateGapDaa,       // Mindestabstand zweier Zinsänderungen (Vorschlag 1 h = 36_000)
+    int freezeAfterDaa,   // ohne Update so lange → jeder darf einfrieren (Vorschlag 2 h = 72_000)
+    int jumpBps,          // größter Sprung je Update, 1 ≤ jumpBps ≤ 10 000 (Vorschlag 2 500 = ×1,25/÷1,25)
+    int refAfter,         // Updates bis ein Preis Referenz wird, ≥ 1 (Vorschlag 6)
+    int initKasUsd, int initOracleDaa, int initSeq, int initStableRate, int initStableIndex,
+    bool initFrozen, int initLastRateDaa,  // Genesis: false und initOracleDaa
+    int initRefKasUsd, int initCandKasUsd, int initCandSeq  // Genesis: initKasUsd, initKasUsd, initSeq
+) {
+    int kasUsd = initKasUsd;
+    int oracleDaa = initOracleDaa;
+    int seq = initSeq;
+    int stableRate = initStableRate;
+    int stableIndex = initStableIndex;
+    bool frozen = initFrozen;
+    int lastRateDaa = initLastRateDaa;
+    int refKasUsd = initRefKasUsd;
+    int candKasUsd = initCandKasUsd;
+    int candSeq = initCandSeq;
+
+    int constant RATE_SCALE = 1000000000;
+    int constant BPS = 10000;
+    int constant MIN_UPDATE_GAP_DAA = 600;    // ≈ 1 min bei 10 BPS (wie v4)
+    int constant MIN_KAS_USD = 1000;          // 0,00001 USD
+    int constant MAX_KAS_USD = 90000000000;   // 900 USD
+
+    // Genau eine Fortsetzung, KAS bleiben in der UTXO (wie v4).
+    function continuation(): int {
+        require(OpAuthOutputCount(this.activeInputIndex) == 1);
+        int outIdx = OpAuthOutputIdx(this.activeInputIndex, 0);
+        require(tx.outputs[outIdx].value == tx.inputs[this.activeInputIndex].value);
+        return outIdx;
+    }
+
+    // Jeder darf den Preis nutzen, solange der Zustand unverändert bleibt.
+    entry read() {
+        int outIdx = continuation();
+        validateOutputState(outIdx, State {
+            kasUsd: kasUsd, oracleDaa: oracleDaa, seq: seq, stableRate: stableRate,
+            stableIndex: stableIndex, frozen: frozen, lastRateDaa: lastRateDaa,
+            refKasUsd: refKasUsd, candKasUsd: candKasUsd, candSeq: candSeq
+        });
+    }
+
+    // Neuer Preis und Zinssatz. Das Register (genau ein Eingang) prüft das
+    // Quorum über (kasUsd, oracleDaa, seq, stableRate), seq + 1 gegen diesen
+    // Eingang und den Ausgang.
+    entry update(int newKasUsd, int newOracleDaa, int newStableRate) {
+        require(OpCovInputCount(regCovId) == 1);
+        require(newKasUsd >= MIN_KAS_USD);
+        require(newKasUsd <= MAX_KAS_USD);
+        // Sprunggrenze (Faktoren ≤ 9e10 · 2e4, kein Überlauf)
+        require(newKasUsd * BPS <= kasUsd * (BPS + jumpBps));
+        require(newKasUsd * (BPS + jumpBps) >= kasUsd * BPS);
+        require(newOracleDaa >= oracleDaa + MIN_UPDATE_GAP_DAA);
+        require(tx.daa >= newOracleDaa);
+        require(newStableRate >= 0);
+        require(newStableRate <= maxRate);
+        // Zinsrahmen wie v4
+        int rateDaa = lastRateDaa;
+        if (newStableRate != stableRate) {
+            require(newOracleDaa >= lastRateDaa + rateGapDaa);
+            require(newStableRate - stableRate <= rateStep);
+            require(stableRate - newStableRate <= rateStep);
+            rateDaa = newOracleDaa;
+        }
+        // Index wie v4: für den abgelaufenen Zeitraum gilt der ALTE Satz
+        int delta = newOracleDaa - oracleDaa;
+        int growth = stableRate * delta / RATE_SCALE;
+        int newIndex = stableIndex + stableIndex * growth / RATE_SCALE;
+        // Referenzpreis fortschreiben
+        int newSeq = seq + 1;
+        int newRef = refKasUsd;
+        int newCand = candKasUsd;
+        int newCandSeq = candSeq;
+        if (newSeq - candSeq >= refAfter) {
+            newRef = candKasUsd;
+            newCand = newKasUsd;
+            newCandSeq = newSeq;
+        }
+        int outIdx = continuation();
+        validateOutputState(outIdx, State {
+            kasUsd: newKasUsd, oracleDaa: newOracleDaa, seq: newSeq, stableRate: newStableRate,
+            stableIndex: newIndex, frozen: false, lastRateDaa: rateDaa,
+            refKasUsd: newRef, candKasUsd: newCand, candSeq: newCandSeq
+        });
+    }
+
+    // Jeder darf ein veraltetes Orakel einfrieren (wie v4). Die Sperre durch
+    // den Wächter wirkt im Register (keine Updates mehr); das Orakel friert
+    // danach spätestens nach freezeAfterDaa über diesen Eintrag ein.
+    entry freeze() {
+        require(tx.daa >= oracleDaa + freezeAfterDaa);
+        int outIdx = continuation();
+        validateOutputState(outIdx, State {
+            kasUsd: kasUsd, oracleDaa: oracleDaa, seq: seq, stableRate: stableRate,
+            stableIndex: stableIndex, frozen: true, lastRateDaa: lastRateDaa,
+            refKasUsd: refKasUsd, candKasUsd: candKasUsd, candSeq: candSeq
+        });
+    }
+}

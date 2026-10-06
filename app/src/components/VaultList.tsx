@@ -25,7 +25,7 @@ const QUICK: { action: CliAction; label: () => string }[] = [
   { action: "close", label: () => tr("Schließen", "Close") },
 ];
 
-export function VaultList({ onAction }: { onAction(action: CliAction, vault: number): void }) {
+export function VaultList({ onAction }: { onAction(action: CliAction, vaultId: string): void }) {
   const { status, network } = useStatus();
   const acc = useAccount();
   const w = useWallet();
@@ -115,24 +115,24 @@ export function VaultList({ onAction }: { onAction(action: CliAction, vault: num
                 ) : !own && !redeemable && !(liquidatable && !frozen) && !sweepable ? null : (
                 <div className="btn-row tight quick" role="group" aria-label={tr(`Aktionen für Vault ${v.index}`, `Actions for vault ${v.index}`)}>
                   {(own ? QUICK : []).map((q) => (
-                    <button key={q.action} type="button" className="btn btn-ghost btn-sm" onClick={() => onAction(q.action, v.index)}>
+                    <button key={q.action} type="button" className="btn btn-ghost btn-sm" onClick={() => onAction(q.action, v.covenantId)}>
                       {q.label()}
                       <span className="sr-only"> {vaultLabel(v, status.vaults, myKey)}</span>
                     </button>
                   ))}
                   {redeemable && (
-                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => onAction("redeem", v.index)}>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => onAction("redeem", v.covenantId)}>
                       {tr("Rücknahme", "Redeem")}
                       <span className="sr-only"> {vaultLabel(v, status.vaults, myKey)}</span>
                     </button>
                   )}
                   {liquidatable && !frozen && (
-                    <button type="button" className="btn btn-danger btn-sm" onClick={() => onAction("liquidate", v.index)}>
+                    <button type="button" className="btn btn-danger btn-sm" onClick={() => onAction("liquidate", v.covenantId)}>
                       {tr("Liquidieren", "Liquidate")}<span className="sr-only"> {vaultLabel(v, status.vaults, myKey)}</span>
                     </button>
                   )}
                   {sweepable && (
-                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => onAction("sweep", v.index)}>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => onAction("sweep", v.covenantId)}>
                       {tr("Auflösen (Zinsadresse)", "Dissolve (interest address)")}
                       <span className="sr-only"> {vaultLabel(v, status.vaults, myKey)}</span>
                     </button>

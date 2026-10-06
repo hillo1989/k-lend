@@ -139,11 +139,36 @@ export const CONTENT_SECURITY_POLICY = [
   "frame-ancestors 'none'",
 ].join("; ");
 
+/**
+ * Permissions-Policy (Audit 20 A20c-7): Die Seite braucht weder Kamera,
+ * Mikrofon, Standort, Zahlungs-API, Geräte-Schnittstellen noch Sensoren;
+ * eingebettete Fremdseiten gibt es nicht. Die Zwischenablage (Kopieren-Knöpfe)
+ * bleibt erlaubt.
+ */
+export const PERMISSIONS_POLICY = [
+  "camera=()",
+  "microphone=()",
+  "geolocation=()",
+  "payment=()",
+  "usb=()",
+  "serial=()",
+  "hid=()",
+  "bluetooth=()",
+  "accelerometer=()",
+  "gyroscope=()",
+  "magnetometer=()",
+  "display-capture=()",
+  "browsing-topics=()",
+].join(", ");
+
 function setCommonHeaders(res: ServerResponse) {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  // A20c-7: Dateien und API-Antworten nur für die eigene Seite (keine Einbindung durch Fremdseiten)
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  res.setHeader("Permissions-Policy", PERMISSIONS_POLICY);
   res.setHeader("Content-Security-Policy", CONTENT_SECURITY_POLICY);
 }
 

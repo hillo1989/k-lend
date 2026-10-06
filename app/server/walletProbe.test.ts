@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { decodeKaspaAddress, encodeKaspaAddress } from "./kaspaAddress.ts";
 import { ValidationError } from "./actions.ts";
 import { buildWalletProbeCall, checkProbeAddress } from "./walletProbe.ts";
 
 const ADDR = "kaspa:qpt7kd3c7505m3wg6knnyj68m7v7s9k0e3d4avfyt0yvnqpfl8n8gqh5jc602";
-const TADDR = "kaspatest:qpt7kd3c7505m3wg6knnyj68m7v7s9k0e3d4avfyt0yvnqpfl8n8gqh5jc602";
+// A20c-1: gleiche Nutzlast im Testnetz – mit eigener Prüfsumme (die alte Zeichenfolge hatte die des Mainnets)
+const TADDR = encodeKaspaAddress("kaspatest", 0, decodeKaspaAddress(ADDR)!.payload);
 const plan = { kind: "ghost-wallet-plan:1", dryOnly: false, tx: {} };
 const probe = { kind: "ghost-wallet-probe:1", network: "mainnet", outpoint: "ab:0" };
 

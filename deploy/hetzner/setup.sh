@@ -4,18 +4,26 @@
 # Als root ausführen; beliebig oft wiederholbar (idempotent). Beim ersten Mal
 # und nach jedem Code-Update (push-from-mac.sh) einfach erneut starten:
 #
-#   DOMAIN=ghost.example.org bash /opt/ghost/kaspa-lending/deploy/hetzner/setup.sh
+#   DOMAIN=ghost.example.org bash /root/ghost-deploy/setup.sh
+#
+# Audit 20 A20c-2: root führt dieses Skript und die systemd-Vorlagen NUR aus
+# einem Ordner aus, der root gehört und für niemanden sonst beschreibbar ist
+# (/root/ghost-deploy, dorthin kopiert push-from-mac.sh deploy/hetzner/).
+# Die Kopie im Code-Ordner gehört dem Dienstbenutzer ghost; ein Bau-Skript
+# einer Abhängigkeit (npm, cargo) könnte sie verändern. Liegt das Skript
+# woanders, bricht es ab (pruefe_root_eigen).
 #
 # Was es tut (Einzelheiten in README.md):
-#   1. Benutzer „ghost“ (ohne Login-Shell), Ordner /opt/ghost
+#   1. Benutzer „ghost“ (Agent, Schlüssel, Bau) und „ghost-web“ (Seite), beide
+#      ohne Login-Shell, Ordner /opt/ghost (Rechtemodell: README „Benutzer und Rechte“)
 #   2. 4 GB Swapdatei, falls es noch keinen Swap gibt
 #   3. Pakete: build-essential, pkg-config, git, Node.js (NodeSource) – lädt der Server
 #   4. Rust (rustup) für den Benutzer ghost
 #   5. Code: liegt schon da (push-from-mac.sh) oder git clone von REPO_URL
-#   6. Bauen: ghostctl (Release) und die Seite (vite build)
+#   6. Bauen: ghostctl (Release) und die Seite (npm ci --ignore-scripts, vite build)
 #   7. systemd: ghost-web (Seite, nur 127.0.0.1) und ghost-agent (GHOST-Agent)
 #   8. Webserver: erkennt, was Port 80/443 belegt (nginx, Apache, Caddy, Docker),
-#      erzeugt einen passenden Block unter deploy/hetzner/generated/ und
+#      erzeugt einen passenden Block unter /etc/ghost/generated/ und
 #      aktiviert ihn NUR nach Rückfrage, mit Konfigurationstest und Reload.
 #      Sind 80/443 frei, bietet es einen eigenen Caddy an.
 #
@@ -75,6 +83,26 @@ port_owner() {
 }
 port_in_use() { [ -n "$(ss -ltnH "sport = :$1" 2>/dev/null)" ]; }
 
+# Audit 20 A20c-2: Gehören Ordner $1, alles darin und alle Ordner darüber root
+# (bzw. ERWARTE_UID, nur für Tests) und kann niemand sonst dort schreiben?
+# Ausgabe: die erste Beanstandung; Rückgabe 1, wenn es eine gibt.
+pruefe_root_eigen() {
+  local d=$1 uid=${ERWARTE_UID:-0} p st owner mode bad
+  [ -d "$d" ] || { echo "$d ist kein Ordner"; return 1; }
+  bad=$(find "$d" \( ! -user "$uid" -o -perm -g+w -o -perm -o+w -o -type l \) -print 2>/dev/null | head -n1)
+  [ -z "$bad" ] || { echo "$bad gehört nicht root, ist eine Verknüpfung oder ist für andere beschreibbar"; return 1; }
+  p=$d
+  while :; do
+    p=$(dirname "$p")
+    st=$(stat -c '%u %a' "$p" 2>/dev/null || stat -f '%u %Lp' "$p")
+    owner=${st%% *}; mode=${st##* }
+    if [ "$owner" != 0 ] && [ "$owner" != "$uid" ]; then echo "$p gehört nicht root (uid $owner)"; return 1; fi
+    if (( (8#$mode & 8#022) != 0 )); then echo "$p ist für andere beschreibbar ($mode)"; return 1; fi
+    [ "$p" = / ] && break
+  done
+  return 0
+}
+
 # --------------------------------------------------------- Vorprüfung ----
 step "Vorprüfung"
 [ "$(id -u)" -eq 0 ] || die "bitte als root ausführen (ssh root@server, dann bash setup.sh)."
@@ -87,6 +115,14 @@ case "$(uname -m)" in
   *) die "Architektur $(uname -m) wird nicht unterstützt (erwartet x86_64 oder aarch64)." ;;
 esac
 [[ $GHOST_PORT =~ ^[0-9]+$ ]] || die "GHOST_PORT muss eine Zahl sein."
+# Skript und Vorlagen nur aus einem root-eigenen Ordner (A20c-2)
+if ! why=$(pruefe_root_eigen "$SCRIPT_DIR"); then
+  die "setup.sh läuft aus einem unsicheren Ordner: $why.
+   root führt Skript und Vorlagen nur aus /root/ghost-deploy aus (push-from-mac.sh legt sie dort an):
+     [Mac]    deploy/hetzner/push-from-mac.sh root@<server>
+     [Server] bash /root/ghost-deploy/setup.sh"
+fi
+ok "Skript und Vorlagen aus $SCRIPT_DIR (gehört root, nur für root beschreibbar)"
 free_gb=$(df -BG --output=avail / | tail -n1 | tr -dc 0-9)
 [ "${free_gb:-0}" -ge 10 ] || warn "nur ${free_gb} GB frei auf / – der Rust-Build braucht etwa 6–8 GB."
 
@@ -105,14 +141,23 @@ fi
 ok "Domain: ${DOMAIN:-(noch keine – Webserver-Teil wird übersprungen)}"
 
 # ------------------------------------------------------- 1. Benutzer ----
-step "1. Benutzer ghost"
+step "1. Benutzer ghost und ghost-web"
 if id ghost >/dev/null 2>&1; then
-  ok "gibt es schon"
+  ok "ghost gibt es schon"
 else
   useradd --system --home-dir "$GHOST_HOME" --create-home --shell /usr/sbin/nologin --user-group ghost
-  ok "angelegt (ohne Login-Shell)"
+  ok "ghost angelegt (ohne Login-Shell)"
 fi
 install -d -m 750 -o ghost -g ghost "$GHOST_HOME"
+# Seite als eigener Benutzer (A20c-3): Zusatzgruppe ghost = Code lesen und
+# deployments/ schreiben; keys/ (700 ghost) bleibt zu, den Agenten erreicht sie nicht
+if id ghost-web >/dev/null 2>&1; then
+  usermod -a -G ghost ghost-web
+  ok "ghost-web gibt es schon"
+else
+  useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --user-group --groups ghost ghost-web
+  ok "ghost-web angelegt (ohne Login-Shell, Zusatzgruppe ghost)"
+fi
 
 # --------------------------------------------------------- 2. Swap ----
 step "2. Swap"
@@ -195,12 +240,18 @@ fi
 chown -R ghost:ghost "$GHOST_DIR"
 chmod 750 "$GHOST_DIR"
 install -d -m 700 -o ghost -g ghost "$GHOST_DIR/keys"
-install -d -m 750 -o ghost -g ghost "$GHOST_DIR/deployments"
+# deployments/: Agent (ghost) und Seite (ghost-web, Gruppe ghost) schreiben dort
+# beide (Sperre, Zustand, Journal, Tresore). setgid: neue Dateien gehören der
+# Gruppe ghost; vorhandene Dateien gruppen-les- und -schreibbar (A20c-3)
+install -d -m 2770 -o ghost -g ghost "$GHOST_DIR/deployments"
+chmod 2770 "$GHOST_DIR/deployments"
+find "$GHOST_DIR/deployments" -mindepth 1 -type d -exec chmod 2770 {} +
+find "$GHOST_DIR/deployments" -mindepth 1 -type f -exec chmod g+rw,o-rwx {} +
 [ -f "$GHOST_DIR/keys/mainnet-owner.json" ] && warn "keys/mainnet-owner.json liegt auf dem Server! Der Hauptschlüssel gehört nur auf den Mac – bitte hier löschen."
-# Vorlagen aus dem Code nehmen (aktueller als eine einzeln kopierte setup.sh)
-TEMPLATES="$GHOST_DIR/deploy/hetzner/templates"
-[ -d "$TEMPLATES" ] || TEMPLATES="$SCRIPT_DIR/templates"
-GENERATED="$GHOST_DIR/deploy/hetzner/generated"
+# Vorlagen NUR aus dem root-eigenen Ordner dieses Skripts, nie aus dem Code-Ordner (A20c-2)
+TEMPLATES="$SCRIPT_DIR/templates"
+[ -d "$TEMPLATES" ] || die "Vorlagen fehlen: $TEMPLATES"
+GENERATED=/etc/ghost/generated
 install -d -m 755 "$GENERATED"
 
 # -------------------------------------------------------- 6. Bauen ----
@@ -218,8 +269,10 @@ fi
 GHOSTCTL="$GHOST_DIR/vendor/silverscript/target/release/ghostctl"
 [ -x "$GHOSTCTL" ] || die "ghostctl wurde nicht gebaut ($GHOSTCTL fehlt)."
 ok "ghostctl: $GHOSTCTL"
-info "Seite (npm ci + vite build) …"
-as_ghost bash -c "cd '$GHOST_DIR/app' && npm ci --no-audit --no-fund --loglevel=error && npx vite build --logLevel warn"
+info "Seite (npm ci ohne Install-Skripte + vite build) …"
+# --ignore-scripts (A20c-2): kein Paket führt beim Installieren Code aus. Die
+# Seite braucht keine Install-Skripte (einziges im Lockfile: fsevents, macOS).
+as_ghost bash -c "cd '$GHOST_DIR/app' && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error && npx vite build --logLevel warn"
 [ -f "$GHOST_DIR/app/dist/index.html" ] || die "vite build hat keine app/dist/index.html erzeugt."
 ok "Seite: $GHOST_DIR/app/dist"
 
@@ -233,7 +286,15 @@ fi
 chmod 644 /etc/ghost/web.env
 render "$TEMPLATES/ghost-web.service" /etc/systemd/system/ghost-web.service
 render "$TEMPLATES/ghost-agent.service" /etc/systemd/system/ghost-agent.service
+systemd-analyze verify /etc/systemd/system/ghost-web.service /etc/systemd/system/ghost-agent.service 2>&1 | grep -v '^$' || true
 systemctl daemon-reload
+# Agent-Speicher: Ubuntu setzt ptrace_scope=1 (nur Eltern dürfen ptracen); 0 wäre unsicher (A20c-3)
+ptrace=$(sysctl -n kernel.yama.ptrace_scope 2>/dev/null || echo "?")
+if [ "$ptrace" = 0 ]; then
+  warn "kernel.yama.ptrace_scope=0 – bitte auf 1 setzen: echo kernel.yama.ptrace_scope=1 > /etc/sysctl.d/10-ptrace.conf && sysctl --system"
+else
+  ok "kernel.yama.ptrace_scope=$ptrace"
+fi
 systemctl enable ghost-web >/dev/null 2>&1
 systemctl restart ghost-web
 sleep 2

@@ -95,8 +95,8 @@ export const actionMeta = (): Record<CliAction, ActionMeta> => ({
     label: tr("Auflösen (Zinsadresse)", "Dissolve (interest address)"),
     vault: true,
     help: tr(
-      "Für Vaults ohne Schuld, deren offener Zins die ganze Sicherheit aufzehrt (das bleibt nach einer Liquidation manchmal übrig). Der Besitzer bekäme beim Schließen nichts mehr, deshalb darf jeder so einen Vault auflösen: Die Sicherheit geht bis auf 0,01 KAS an die Zinsadresse, der Vault endet. Die Netzgebühr von etwa 0,05 KAS zahlst du bis auf diese 0,01 KAS selbst.",
-      "For vaults without debt whose open interest eats up all the collateral (this sometimes remains after a liquidation). The owner would get nothing when closing, so anyone may dissolve such a vault: the collateral goes to the interest address except for 0.01 KAS, and the vault ends. You pay the network fee of about 0.05 KAS yourself, minus those 0.01 KAS.",
+      "Für Vaults ohne Schuld, deren offener Zins die ganze Sicherheit aufzehrt (das bleibt nach einer Liquidation manchmal übrig). Der Besitzer bekäme beim Schließen nichts mehr, deshalb darf jeder so einen Vault auflösen: Die Sicherheit geht an die Zinsadresse, der Vault endet. Die Netzgebühr von 0,1 KAS trägt der Vault (sie geht von der Sicherheit ab); wer auflöst, zahlt nichts.",
+      "For vaults without debt whose open interest eats up all the collateral (this sometimes remains after a liquidation). The owner would get nothing when closing, so anyone may dissolve such a vault: the collateral goes to the interest address and the vault ends. The vault bears the network fee of 0.1 KAS (deducted from the collateral); whoever dissolves pays nothing.",
     ),
   },
   liquidate: {

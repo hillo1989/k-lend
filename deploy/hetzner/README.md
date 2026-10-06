@@ -30,7 +30,8 @@ Besucher ──HTTPS──▶ Webserver auf Port 443 (dein vorhandener: nginx / 
                    deployments/mainnet.json (Zustand, keine Schlüssel)
 ```
 
-- Alles von GHOST liegt unter **/opt/ghost/** und läuft als eigener Benutzer **ghost**. Dein anderes Projekt bleibt davon unberührt.
+- Alles von GHOST liegt unter **/opt/ghost/**. Der Agent läuft als Benutzer **ghost**, die Seite als eigener Benutzer **ghost-web** (siehe „Benutzer und Rechte“). Dein anderes Projekt bleibt davon unberührt.
+- Einrichtungsskript und Dienst-Vorlagen liegen root-eigen unter **/root/ghost-deploy/**; nur von dort führt root sie aus.
 - Der Hauptschlüssel **keys/mainnet-owner.json bleibt auf dem Mac**. Auf den Server kommen nur der Unterzeichner (signer) und eine eigene Gebühren-Wallet (keeper).
 - **Der Agent läuft nur an einer Stelle.** Sobald er auf dem Server läuft, bleibt das Fenster „GHOST-Agent starten“ auf dem Mac zu. Sonst greifen beide auf dieselben Coins zu und behindern sich.
 
@@ -122,7 +123,7 @@ Die Seite braucht einen Namen, z. B. **ghost.example.org**. Am einfachsten nimms
 deploy/hetzner/push-from-mac.sh root@<server-ip>
 ```
 
-Das kopiert den Code nach `/opt/ghost/kaspa-lending`. **Nicht** kopiert werden `keys/`, `deployments/`, `node_modules` und Build-Ordner. Was auf dem Server unter `deployments/` liegt, bleibt immer unberührt.
+Das kopiert den Code nach `/opt/ghost/kaspa-lending` und dazu `deploy/hetzner/` (Einrichtungsskript, Vorlagen) nach `/root/ghost-deploy/`, root-eigen und nur für root lesbar. **Nicht** kopiert werden `keys/`, `deployments/`, `node_modules` und Build-Ordner. Was auf dem Server unter `deployments/` liegt, bleibt immer unberührt.
 
 ### Variante B: per git clone
 
@@ -131,28 +132,28 @@ Nur wenn dein Projekt in einem Git-Repository im Netz liegt, z. B. ein privates 
 **[Server]**
 
 ```
-REPO_URL=https://github.com/<du>/kaspa-lending.git bash setup.sh
+REPO_URL=https://github.com/<du>/kaspa-lending.git bash /root/ghost-deploy/setup.sh
 ```
 
-Dafür muss `setup.sh` schon auf dem Server liegen, z. B. vorher mit `scp deploy/hetzner/setup.sh root@<server-ip>:` hochgeladen. Das Skript klont dann samt `vendor/silverscript` (`--recurse-submodules`). Später holst du neuen Code mit `GIT_PULL=1 bash …/setup.sh`.
+Dafür muss `deploy/hetzner/` schon root-eigen unter `/root/ghost-deploy/` liegen (z. B. `scp -r deploy/hetzner root@<server-ip>:/root/ghost-deploy`, danach `chown -R root:root /root/ghost-deploy && chmod -R go-rwx /root/ghost-deploy`); aus einem anderen Ordner startet `setup.sh` nicht. Das Skript klont dann samt `vendor/silverscript` (`--recurse-submodules`). Später holst du neuen Code mit `GIT_PULL=1 bash …/setup.sh`.
 
 ## Schritt 6: Einrichtungsskript ausführen
 
 **[Server]**
 
 ```
-DOMAIN=ghost.example.org bash /opt/ghost/kaspa-lending/deploy/hetzner/setup.sh
+DOMAIN=ghost.example.org bash /root/ghost-deploy/setup.sh
 ```
 
 Das Skript arbeitet diese Punkte ab und sagt bei jedem, was es tut:
 
-1. legt den Benutzer `ghost` an, ohne Login-Shell; niemand kann sich als ghost anmelden;
+1. prüft, dass es selbst und die Vorlagen nur root gehören (sonst Abbruch); legt die Benutzer `ghost` (Agent, Schlüssel, Bau) und `ghost-web` (Seite) an, beide ohne Login-Shell;
 2. legt eine 4-GB-Swapdatei an, falls noch kein Swap da ist. Bei 2 GB RAM braucht der Rust-Build sie;
 3. installiert Pakete (build-essential, pkg-config, git) und Node.js 24 aus der offiziellen NodeSource-Quelle. Ist schon ein älteres Node.js da, **fragt es vorher**, denn das andere Projekt könnte es brauchen;
 4. installiert Rust (rustup) nur für den Benutzer ghost;
-5. baut `ghostctl` und die Seite. **Beim ersten Mal dauert das 20 bis 60 Minuten.** Das ist normal. Das Fenster offen lassen;
+5. baut `ghostctl` und die Seite (`npm ci --ignore-scripts`: kein Paket führt beim Installieren eigenen Code aus). **Beim ersten Mal dauert das 20 bis 60 Minuten.** Das ist normal. Das Fenster offen lassen;
 6. richtet die Dienste `ghost-web` (die Seite) und `ghost-agent` ein. Der Agent startet erst, wenn Schlüssel und Zustandsdatei da sind (Schritte 7 und 8);
-7. erkennt deinen Webserver, legt passende Konfigurationsdateien unter `/opt/ghost/kaspa-lending/deploy/hetzner/generated/` ab und **fragt**, ob es sie aktivieren soll (siehe Abschnitt 9).
+7. erkennt deinen Webserver, legt passende Konfigurationsdateien unter `/etc/ghost/generated/` ab und **fragt**, ob es sie aktivieren soll (siehe Abschnitt 9).
 
 Das Skript darfst du jederzeit erneut ausführen. Was schon erledigt ist, überspringt es.
 
@@ -192,7 +193,7 @@ Das Skript lädt **nur** diese beiden Dateien hoch. Auf dem Server gilt dann: Or
    Das kopiert `deployments/mainnet.json` (enthält keine Schlüssel) und, falls vorhanden, `mainnet-zins.json` (Takt der Zinsregel) und `mainnet-tresore.json`. Liegen sie schon auf dem Server, bleiben sie dort, denn der Server-Agent führt sie dann selbst weiter.
 3. Agent starten **[Server]**:
    ```
-   bash /opt/ghost/kaspa-lending/deploy/hetzner/setup.sh
+   bash /root/ghost-deploy/setup.sh
    ```
    Das Skript fragt: „Mac-Agent ist aus – ghost-agent jetzt hier starten?“ Antworte `j`.
    Alternativ direkt: `systemctl enable --now ghost-agent`
@@ -215,9 +216,9 @@ Den Keeper-Schlüssel benutzt du auf dem Mac nicht mehr für Aktionen; er gehör
 Das Einrichtungsskript hat drei Vorlagen erzeugt, alle mit deiner Domain und als Reverse Proxy auf `127.0.0.1:8787`:
 
 ```
-/opt/ghost/kaspa-lending/deploy/hetzner/generated/nginx-ghost.conf
-/opt/ghost/kaspa-lending/deploy/hetzner/generated/apache-ghost.conf
-/opt/ghost/kaspa-lending/deploy/hetzner/generated/ghost.caddy
+/etc/ghost/generated/nginx-ghost.conf
+/etc/ghost/generated/apache-ghost.conf
+/etc/ghost/generated/ghost.caddy
 ```
 
 Ansehen kannst du sie mit `cat <datei>`. Aktiviert wird **nur nach deiner Zustimmung** im Skript. Vorher prüft es die Konfiguration, und danach lädt es den Webserver nur **neu** (reload), statt ihn neu zu starten. Dein anderes Projekt fällt dabei nicht aus. Schlägt die Prüfung fehl, nimmt das Skript seine Änderung zurück und lädt nichts neu.
@@ -229,7 +230,7 @@ Das Skript legt den Block als `/etc/nginx/sites-available/ghost.conf` ab und ver
 Von Hand geht es genauso **[Server]**:
 
 ```
-cp /opt/ghost/kaspa-lending/deploy/hetzner/generated/nginx-ghost.conf /etc/nginx/sites-available/ghost.conf
+cp /etc/ghost/generated/nginx-ghost.conf /etc/nginx/sites-available/ghost.conf
 ln -s /etc/nginx/sites-available/ghost.conf /etc/nginx/sites-enabled/ghost.conf
 nginx -t && systemctl reload nginx
 apt install certbot python3-certbot-nginx
@@ -376,7 +377,7 @@ Anhalten mit `systemctl stop ghost-agent`, dauerhaft aus mit `systemctl disable 
 ### Aktualisieren mit neuem Code
 
 1. **[Mac]** `deploy/hetzner/push-from-mac.sh root@<server-ip>` (ohne `--zustand`)
-2. **[Server]** `bash /opt/ghost/kaspa-lending/deploy/hetzner/setup.sh`
+2. **[Server]** `bash /root/ghost-deploy/setup.sh`
 
 Das Skript baut neu und startet beide Dienste neu. Sendet der Agent im Moment des Neustarts gerade etwas, klärt ghostctl das beim nächsten Start selbst über sein Journal.
 
@@ -409,12 +410,38 @@ Die Schlüssel selbst sicherst du nur auf dem Mac, so wie bisher.
 
 ### Trennung vom anderen Projekt
 
-- GHOST läuft als eigener Benutzer `ghost` in `/opt/ghost`. Die Dienste dürfen nur in `deployments/` schreiben und sehen keine Home-Ordner. Die Seite sieht den Ordner `keys/` überhaupt nicht.
+- GHOST läuft in `/opt/ghost` als Benutzer `ghost` (Agent) und `ghost-web` (Seite). Die Dienste dürfen nur in `deployments/` schreiben und sehen keine Home-Ordner. Die Seite sieht den Ordner `keys/` überhaupt nicht. Einzelheiten: „Benutzer und Rechte“.
 - Die Seite lauscht nur auf `127.0.0.1:8787`. Nach außen geht es ausschließlich über deinen Webserver und dort nur für deine GHOST-Domain. Die anderen Seiten auf dem Webserver bleiben, wie sie sind.
 - Das Skript ändert am Webserver nur nach Rückfrage. Es prüft vorher und lädt ihn nur neu, statt ihn neu zu starten.
 - Die Seite ist auf 600 MB Speicher begrenzt und startet höchstens 2 ghostctl-Prozesse gleichzeitig. Status und Preis werden zwischengespeichert, sodass viele Besucher kaum Last erzeugen.
 - Node.js wird nur dann systemweit angehoben, wenn du zustimmst.
 - Brauchst du Port 8787 für etwas anderes: `GHOST_PORT=8788 bash …/setup.sh`.
+
+### Benutzer und Rechte (Audit 20 A20c-2/3)
+
+| Pfad | Besitzer | Rechte | Wer schreibt |
+|---|---|---|---|
+| `/root/ghost-deploy/` (setup.sh, Vorlagen) | root:root | 700/600 | nur root (push-from-mac.sh) |
+| `/opt/ghost/kaspa-lending/` (Code, Bau) | ghost:ghost | 750 | ghost beim Bau (cargo, npm); die Dienste nie (`ProtectSystem=strict`) |
+| `keys/` | ghost:ghost | 700/600 | niemand im Betrieb; nur der Agent liest |
+| `deployments/` | ghost:ghost | 2770, Dateien 660 | Agent **und** Seite |
+| `/etc/ghost/` (web.env, generated/) | root | 755/644 | nur setup.sh |
+
+- **ghost-agent** läuft als `ghost`: als einziger kann er `keys/` lesen.
+- **ghost-web** läuft als `ghost-web` mit Zusatzgruppe `ghost`: liest den Code, schreibt in `deployments/`, sieht `keys/` nicht (700 und `InaccessiblePaths`). Den Agenten kann sie weder sehen (`ProtectProc=invisible`) noch mit Signalen erreichen (anderer Benutzer).
+- **Warum die Seite in `deployments/` schreiben muss:** `ghostctl status` und `wallet submit` nehmen dort die Sperre (`mainnet.lock`), gleichen den Zustand ab (`mainnet.json` über `mainnet.tmp`), führen das Journal (`*.pending.json`) und legen Wallet-Tresore an (`mainnet-tresore.json`). Deshalb `UMask=0007` in beiden Diensten und das setgid-Bit: neue Dateien gehören der Gruppe `ghost` und sind für beide les- und schreibbar. Eine übernommene Seite kann den Zustand also weiterhin verändern (ghostctl gleicht ihn mit der Kette ab), aber keine Schlüssel lesen und den Agenten nicht anhalten.
+- Beide Dienste: `SystemCallFilter=@system-service ~@privileged @obsolete`, `NoExecPaths` für `deployments/` und `/tmp`, keine Capabilities, `NoNewPrivileges`. Die Seite behält `AF_UNIX` (Node verbindet ghostctl über socketpair) und darf JIT (Node).
+- `kernel.yama.ptrace_scope` soll mindestens 1 sein; setup.sh zeigt den Wert und warnt bei 0.
+- Offen: Gebaut wird weiter als `ghost`. Ein Bau-Skript einer Abhängigkeit (cargo `build.rs`) läuft damit als der Benutzer, dem `keys/` gehört. Root erreicht es nicht mehr (Skript und Vorlagen liegen in `/root/ghost-deploy/`).
+
+### Umstellung eines laufenden Servers (einmalig, Audit 20)
+
+1. **[Mac]** `deploy/hetzner/push-from-mac.sh root@<server-ip>` – bringt Code und `/root/ghost-deploy/`.
+2. **[Server]** `bash /root/ghost-deploy/migration-a20c.sh` – zeigt nur, was es ändern würde.
+3. **[Server]** `bash /root/ghost-deploy/migration-a20c.sh --ausfuehren` – legt `ghost-web` an, setzt die Rechte von `deployments/`, erzeugt die Units neu, startet erst die Seite, dann (falls er lief) den Agenten und prüft beide. Bei einem Fehler nimmt es die alten Units zurück; die Sicherung liegt unter `/root/ghost-units.vor-a20c.<Zeit>/`.
+4. **[Server]** `bash /root/ghost-deploy/setup.sh` – baut den neuen Code.
+5. Kontrolle: `ps -o user=,comm= -C node,ghostctl` zeigt `ghost-web node` und `ghost ghostctl`; `systemctl status ghost-web ghost-agent`.
+6. Die alte Kopie `/opt/ghost/kaspa-lending/deploy/hetzner/generated/` wird nicht mehr benutzt; Blöcke erzeugt setup.sh jetzt unter `/etc/ghost/generated/`.
 
 ### Was die öffentliche Seite kann und was nicht
 
@@ -429,7 +456,7 @@ Die Schlüssel selbst sicherst du nur auf dem Mac, so wie bisher.
 | Wo | Befehl |
 |---|---|
 | Mac | `deploy/hetzner/push-from-mac.sh root@<ip>` |
-| Server | `DOMAIN=ghost.example.org bash /opt/ghost/kaspa-lending/deploy/hetzner/setup.sh` |
+| Server | `DOMAIN=ghost.example.org bash /root/ghost-deploy/setup.sh` |
 | Mac | `deploy/hetzner/keys-upload.sh root@<ip>` |
 | Mac | Agent-Fenster schließen, dann `deploy/hetzner/push-from-mac.sh root@<ip> --zustand` |
 | Server | `setup.sh` erneut ausführen und den Agentenstart mit `j` bestätigen |

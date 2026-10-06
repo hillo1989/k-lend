@@ -8,13 +8,15 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { encodeKaspaAddress } from "./kaspaAddress.ts";
 import { createGhostApi } from "./api.ts";
 import { publicRouteAllowed, ValidationError } from "./actions.ts";
 import { buildWalletBuildArgs, buildWalletSubmitCall, buildWalletTresoreArgs, PLAN_KIND, WALLET_PARAMS } from "./walletActions.ts";
 
-const A = "kaspa:q" + "qpzry9x8gf2tvdw0s3jn54khce6mua7l".repeat(2).slice(0, 60);
-const B = "kaspa:q" + "pzry9x8gf2tvdw0s3jn54khce6mua7lq".repeat(2).slice(0, 60);
-const T = "kaspatest:q" + "qpzry9x8gf2tvdw0s3jn54khce6mua7l".repeat(2).slice(0, 60);
+// A20c-1: Testadressen mit gültiger Prüfsumme (vorher nur Zeichensatz und Länge)
+const A = encodeKaspaAddress("kaspa", 0, Array(32).fill(0x11));
+const B = encodeKaspaAddress("kaspa", 0, Array(32).fill(0x22));
+const T = encodeKaspaAddress("kaspatest", 0, Array(32).fill(0x11));
 const COV = "c0ffee".repeat(10) + "abcd";
 
 function bad(f: () => unknown, re: RegExp) {

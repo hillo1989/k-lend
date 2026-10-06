@@ -28,6 +28,7 @@
 import { isIP } from "node:net";
 import { checkAmount, checkDate, checkInterval, checkMessage, checkVault, isNetwork, ValidationError, type Network } from "./actions.ts";
 import { checkProbeAddress } from "./walletProbe.ts";
+import { decodeKaspaAddress } from "./kaspaAddress.ts";
 
 export const WALLET_ACTIONS = [
   "open-vault",
@@ -116,6 +117,8 @@ function kasAddress(v: unknown, network: Network): string {
   if (!m) throw new ValidationError("Empfänger: Kaspa-Adresse (kaspa:…) erwartet.");
   const want = network === "mainnet" ? "kaspa" : "kaspatest";
   if (m[1] !== want) throw new ValidationError(`Empfänger: Adresse passt nicht zum Netz ${network}.`);
+  // Prüfsumme, Version (Schnorr, ECDSA, Skript) und Länge (A20c-1)
+  if (!decodeKaspaAddress(s)) throw new ValidationError("Empfänger: Prüfsumme der Adresse stimmt nicht (Tippfehler?).");
   return s;
 }
 

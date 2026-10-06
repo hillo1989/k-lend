@@ -1027,6 +1027,7 @@ pub fn precheck(plan: &ActionPlan, signed: &SafeTx, network: &str, prefix: Prefi
         return Err("Plan ohne zu signierende Eingänge".into());
     }
     let (utx, ue) = from_safe(&plan.tx)?;
+    check_plan_shape(plan, &utx)?;
     let mut rep = Report { planned_units: plan.used_units.clone(), ..Default::default() };
     let (stx, se) = match from_safe(signed) {
         Ok(x) => x,
@@ -1035,6 +1036,16 @@ pub fn precheck(plan: &ActionPlan, signed: &SafeTx, network: &str, prefix: Prefi
             return Ok(rep);
         }
     };
+    if stx.inputs.len() != utx.inputs.len() || stx.outputs.len() != utx.outputs.len() {
+        rep.error = Some(format!(
+            "Die Wallet hat die Tx verändert: {} Eingänge / {} Ausgänge statt {} / {}",
+            stx.inputs.len(),
+            stx.outputs.len(),
+            utx.inputs.len(),
+            utx.outputs.len()
+        ));
+        return Ok(rep);
+    }
     let (changed, ignored) = wallet::diff(&utx, &ue, &stx, &se, &plan.signers, false);
     rep.changed = changed;
     rep.ignored = ignored;
@@ -1046,6 +1057,37 @@ pub fn precheck(plan: &ActionPlan, signed: &SafeTx, network: &str, prefix: Prefi
         rep.error = Some("Mindestens eine Signatur fehlt oder ist ungültig".into());
     }
     Ok(rep)
+}
+
+/// Höchstzahl der Eingänge und Ausgänge eines Plans: Die Aktionen von
+/// ghostctl haben höchstens 8 eigene Eingänge plus wenige Covenant-Eingänge
+/// und höchstens etwa 6 Ausgänge; alles darüber ist kein Plan von `build`.
+pub const MAX_PLAN_INPUTS: usize = 24;
+pub const MAX_PLAN_OUTPUTS: usize = 16;
+
+/// Form des Plans vor jeder Signaturprüfung (Audit 20 A20b-4): Vorher rechnete
+/// `precheck` je Signer-Eintrag einen vollen Sighash und eine Schnorr-Prüfung,
+/// ohne Zahl und Eindeutigkeit zu prüfen – ein 714-kB-Plan mit 5 000 Einträgen
+/// kostete 0,8 s CPU je Aufruf. Jetzt: höchstens so viele Signer-Einträge wie
+/// Eingänge, jeder Eingang höchstens einmal, Eingänge und Ausgänge begrenzt.
+pub fn check_plan_shape(plan: &ActionPlan, utx: &kaspa_consensus_core::tx::Transaction) -> Result<(), String> {
+    let (n_in, n_out) = (utx.inputs.len(), utx.outputs.len());
+    if n_in > MAX_PLAN_INPUTS || n_out > MAX_PLAN_OUTPUTS {
+        return Err(format!("Plan: {n_in} Eingänge / {n_out} Ausgänge – kein Plan von ghostctl (höchstens {MAX_PLAN_INPUTS} / {MAX_PLAN_OUTPUTS})"));
+    }
+    if plan.signers.len() > n_in {
+        return Err(format!("Plan: {} zu signierende Eingänge bei {n_in} Eingängen", plan.signers.len()));
+    }
+    let mut seen = vec![false; n_in];
+    for sp in &plan.signers {
+        if sp.index >= n_in {
+            return Err(format!("Plan: Eingang {} gibt es nicht", sp.index));
+        }
+        if std::mem::replace(&mut seen[sp.index], true) {
+            return Err(format!("Plan: Eingang {} steht mehrfach in der Signer-Liste", sp.index));
+        }
+    }
+    Ok(())
 }
 
 /// Wallet-Antwort übernehmen. Err = Plan unbrauchbar (veraltet, verändert,

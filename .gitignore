@@ -19,3 +19,16 @@ bin/ghostctl-v3
 deployments/.umzug-v4.lock/
 # vom Server-Setup erzeugte Webserver-Blöcke (deploy/hetzner/setup.sh)
 deploy/hetzner/generated/
+# Zustand, Tresore, Zinsregel, Journale und Sperren des Betriebs (Audit 20
+# A20c-6): Besucher-Tresore enthalten Empfänger, Beträge und Nachrichten.
+# Alles unter deployments/ bleibt lokal; nur die Kettendaten der ersten
+# Version sind öffentlich und getrackt (Ausnahmen unten).
+deployments/*
+!deployments/mainnet-v1.json
+!deployments/testnet-10-v1.json
+# auch außerhalb von deployments/ nie mitnehmen
+*-tresore.json
+*-zins.json
+*-abos.json
+*-txlog.jsonl
+*.pending.json

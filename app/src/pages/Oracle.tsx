@@ -2,7 +2,7 @@ import { ActionForms } from "../components/ActionForms";
 import { StatusNotices } from "../components/Network";
 import { OracleCard } from "../components/OracleCard";
 import { Callout } from "../components/ui";
-import { NATIVE, NETWORKS, STABLE_SYMBOL } from "../config";
+import { MAX_SIGNERS, NATIVE, NETWORKS, STABLE_SYMBOL } from "../config";
 import { useStatus } from "../lib/StatusContext";
 import { tr } from "../lib/i18n";
 import { usePublicMode } from "../lib/AccountContext";
@@ -44,8 +44,8 @@ export function Oracle() {
             <li>
               <strong>{tr("Signatur:", "Signature:")}</strong>{" "}
               {tr(
-                "Im Register steht nur der Hash des Unterzeichner-Satzes: n Schlüssel (höchstens 9), Preis-Schwelle t und Austausch-Schwelle. t muss eine echte Mehrheit sein (2t > n). Fehlen Signaturen, nimmt der Vertrag den Preis nicht an. Zum Start gibt es 1 Unterzeichner, den Betreiber, und 1 Signatur genügt.",
-                "The register only stores the hash of the signer set: n keys (at most 9), price threshold t and rotation threshold. t must be a true majority (2t > n). If signatures are missing, the contract rejects the price. At launch there is 1 signer, the operator, and 1 signature suffices.",
+                `Im Register steht nur der Hash des Unterzeichner-Satzes: n Schlüssel (höchstens ${MAX_SIGNERS}), Preis-Schwelle t und Austausch-Schwelle. t muss eine echte Mehrheit sein (2t > n). Fehlen Signaturen, nimmt der Vertrag den Preis nicht an. Zum Start gibt es 1 Unterzeichner, den Betreiber, und 1 Signatur genügt.`,
+                `The register only stores the hash of the signer set: n keys (at most ${MAX_SIGNERS}), price threshold t and rotation threshold. t must be a true majority (2t > n). If signatures are missing, the contract rejects the price. At launch there is 1 signer, the operator, and 1 signature suffices.`,
               )}
             </li>
             <li>

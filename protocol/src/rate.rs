@@ -17,6 +17,20 @@
 //! - Die letzte Zinsänderung aus der Zukunft (Uhr lief einmal vor) zählt ab
 //!   dem Zeitpunkt, an dem sie bemerkt wird; vorher wartete die Zinsregel bis
 //!   zu diesem Zeitpunkt, bei +10 Jahren also für immer (Audit 12 A12-3).
+//! - Totzone + nur bei Handel (Entscheidung des Betreibers 06.10.2026, Audit 20
+//!   A20e-6): Der Zins ändert sich nur, wenn der Median AUSSERHALB der Totzone
+//!   0,97–1,03 USD liegt (= Kursband des Pools, `math::RATE_ZONE`) UND der Pool
+//!   im Messfenster gehandelt wurde. „Gehandelt“ heißt: Das Tauschverhältnis
+//!   des Pools selbst (KAS-Reserve ÷ GHOST-Reserve, ohne den KAS-Marktpreis)
+//!   hat sich zwischen aufeinanderfolgenden Messungen im Fenster zusammen um
+//!   mindestens `MIN_TRADE_MOVE` (2 %) bewegt. Das Verhältnis ändert sich nur
+//!   durch Tausch (Einlegen/Abziehen halten es bis auf Rundung), bei einem
+//!   Produktpool entsprechen 2 % etwa 1 % der Reserve als Umsatz – im kleinsten
+//!   messbaren Pool (10 GHOST) ≈ 0,1 GHOST. Ohne Handel bildet die Messung
+//!   nur die KAS-Bewegung ab (Ratsche A20e-6), das zählt nicht. Ein Tausch hin
+//!   und zurück innerhalb von 4 min ist unsichtbar und zählt ebenfalls nicht;
+//!   außerhalb des Bands lässt der Pool nur Tausche Richtung Band zu, ein
+//!   vorgetäuschter Umsatz schiebt den Kurs also in die Totzone.
 //! - Messungen und der Zeitpunkt der letzten Zinsänderung liegen in
 //!   `deployments/<netz>-zins.json` neben der Zustandsdatei, geschrieben unter
 //!   einer eigenen Dateisperre. So gilt „höchstens eine Zinsänderung je Stunde“
@@ -50,6 +64,10 @@ pub const EVERY_SECS: u64 = 3600;
 /// 10 GHOST sind ein Fünftel eines vollen Mainnet-Vaults (50 GHOST), also
 /// ein Pool, in den jemand echtes Kapital gelegt hat.
 pub const MIN_POOL_GHOST: i64 = 10 * math::E8;
+/// Mindestbewegung des Tauschverhältnisses im Messfenster, damit der Pool als
+/// gehandelt gilt (Summe der Beträge der logarithmischen Änderungen zwischen
+/// aufeinanderfolgenden Messungen): 2 % ≈ 1 % der Reserve als Umsatz
+pub const MIN_TRADE_MOVE: f64 = 0.02;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +75,10 @@ pub struct Sample {
     /// Unix-Sekunden
     pub at: u64,
     pub ghost_usd: f64,
+    /// Tauschverhältnis des Pools (KAS-Reserve ÷ GHOST-Reserve) bei der
+    /// Messung; ältere Messungen haben es nicht (zählen dann nicht als Handel)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_ratio: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -81,6 +103,10 @@ pub enum Decision {
     TooShort { have: usize, span_secs: u64 },
     /// Median im Zielband (oder Rahmen erreicht): Zins bleibt
     Keep { median: f64, have: usize },
+    /// Median außerhalb der Totzone, aber der Pool wurde im Fenster nicht
+    /// (genug) gehandelt: Zins bleibt (A20e-6). `moved` = Bewegung des
+    /// Tauschverhältnisses im Fenster
+    NoTrade { median: f64, have: usize, moved: f64 },
     /// Zins ändern
     Change { median: f64, have: usize, next: f64 },
 }
@@ -100,6 +126,12 @@ pub fn median(v: &[f64]) -> Option<f64> {
     s.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = s.len();
     Some(if n % 2 == 1 { s[n / 2] } else { (s[n / 2 - 1] + s[n / 2]) / 2.0 })
+}
+
+/// Tauschverhältnis des Pools: KAS-Reserve ÷ GHOST-Reserve
+pub fn pool_ratio(x: i64, y: i64) -> Option<f64> {
+    let r = x as f64 / y as f64;
+    (y > 0 && x > 0 && r.is_finite()).then_some(r)
 }
 
 /// Eine Messung aus dem frisch abgeglichenen Pool: Ok(GHOST in USD) oder
@@ -135,9 +167,14 @@ impl RateLog {
         }
     }
 
-    /// Messung aufnehmen, wenn die letzte mindestens SAMPLE_GAP_SECS zurückliegt.
-    /// true = aufgenommen.
+    /// Messung ohne Tauschverhältnis aufnehmen (zählt nicht als Handel)
     pub fn record(&mut self, now: u64, ghost_usd: f64) -> bool {
+        self.record_pool(now, ghost_usd, None)
+    }
+
+    /// Messung samt Tauschverhältnis des Pools aufnehmen, wenn die letzte
+    /// mindestens SAMPLE_GAP_SECS zurückliegt. true = aufgenommen.
+    pub fn record_pool(&mut self, now: u64, ghost_usd: f64, pool_ratio: Option<f64>) -> bool {
         self.prune(now);
         if !ghost_usd.is_finite() || ghost_usd <= 0.0 {
             return false;
@@ -145,8 +182,16 @@ impl RateLog {
         if self.samples.last().is_some_and(|s| now - s.at < SAMPLE_GAP_SECS) {
             return false;
         }
-        self.samples.push(Sample { at: now, ghost_usd });
+        let pool_ratio = pool_ratio.filter(|r| r.is_finite() && *r > 0.0);
+        self.samples.push(Sample { at: now, ghost_usd, pool_ratio });
         true
+    }
+
+    /// Bewegung des Tauschverhältnisses im Fenster: Summe |ln(r_i / r_i−1)|
+    /// über aufeinanderfolgende Messungen mit Verhältnis (A20e-6)
+    pub fn traded_move(&self, now: u64) -> f64 {
+        let r: Vec<f64> = self.samples.iter().filter(|s| s.at <= now && now - s.at < WINDOW_SECS).filter_map(|s| s.pool_ratio).collect();
+        r.windows(2).map(|w| (w[1] / w[0]).ln().abs()).filter(|m| m.is_finite()).sum()
     }
 
     /// Messungen im Fenster
@@ -181,7 +226,15 @@ impl RateLog {
         }
         let median = median(&w).expect("Fenster nicht leer");
         match math::rate_next(current_pct, median) {
-            Some(next) => Decision::Change { median, have: w.len(), next },
+            // außerhalb der Totzone: nur, wenn im Fenster gehandelt wurde (A20e-6)
+            Some(next) => {
+                let moved = self.traded_move(now);
+                if moved + 1e-12 < MIN_TRADE_MOVE {
+                    Decision::NoTrade { median, have: w.len(), moved }
+                } else {
+                    Decision::Change { median, have: w.len(), next }
+                }
+            }
             None => Decision::Keep { median, have: w.len() },
         }
     }
@@ -257,10 +310,16 @@ mod tests {
     /// sechs Messungen im Abstand STEP liegen genau MIN_SPAN_SECS auseinander
     const STEP: u64 = MIN_SPAN_SECS / 5;
 
+    /// Tauschverhältnis eines gehandelten Pools: schwankt je Messung um 1 %
+    fn traded(i: usize) -> Option<f64> {
+        Some(25.0 * if i % 2 == 0 { 1.0 } else { 1.01 })
+    }
+
+    /// Messungen eines gehandelten Pools (Tauschverhältnis bewegt sich)
     fn log_with(values: &[f64], start: u64, step: u64) -> RateLog {
         let mut l = RateLog::new("mainnet");
         for (i, v) in values.iter().enumerate() {
-            assert!(l.record(start + i as u64 * step, *v));
+            assert!(l.record_pool(start + i as u64 * step, *v, traded(i)));
         }
         l
     }
@@ -302,21 +361,21 @@ mod tests {
         assert_eq!(l.decide(now, 3.0), Decision::TooFew { have: 5 });
         // die sechste entscheidet (sechs Messungen über 45 min)
         let mut l = l;
-        assert!(l.record(now + STEP, 0.9));
+        assert!(l.record_pool(now + STEP, 0.9, traded(5)));
         assert_eq!(l.decide(now + STEP, 3.0), Decision::Change { median: 0.9, have: 6, next: 3.5 });
-        // im Band ±0,5 %: bleibt
-        let l = log_with(&[1.004, 0.996, 1.0, 1.0, 1.001, 0.999], T0, STEP);
+        // in der Totzone ±3 %: bleibt
+        let l = log_with(&[1.029, 0.971, 1.0, 1.0, 1.02, 0.98], T0, STEP);
         assert!(matches!(l.decide(T0 + 5 * STEP, 3.0), Decision::Keep { .. }));
     }
 
     #[test]
     fn median_statt_einzelmessung() {
-        // Audit-Fall A11-O-1: ein Kauf hebt den Kurs für eine Runde auf 1,0051
-        let l = log_with(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0051], T0, STEP);
+        // Audit-Fall A11-O-1: ein Kauf hebt den Kurs für eine Runde über die Totzone
+        let l = log_with(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.04], T0, STEP);
         assert!(matches!(l.decide(T0 + 5 * STEP, 3.0), Decision::Keep { .. }), "eine Messung darf den Zins nicht bewegen");
         // hält der Kurs die Mehrheit der Messungen über 45 min, folgt der Zins
-        let l = log_with(&[1.0, 1.0, 1.006, 1.006, 1.006, 1.006], T0, STEP);
-        assert_eq!(l.decide(T0 + 5 * STEP, 3.0), Decision::Change { median: 1.006, have: 6, next: 2.5 });
+        let l = log_with(&[1.0, 1.0, 1.04, 1.04, 1.04, 1.04], T0, STEP);
+        assert_eq!(l.decide(T0 + 5 * STEP, 3.0), Decision::Change { median: 1.04, have: 6, next: 2.5 });
     }
 
     #[test]
@@ -346,7 +405,7 @@ mod tests {
         assert_eq!(l.reserve(now + 30), None);
         // nach einer Stunde wieder frei, mit neuen Messungen
         for i in 1..=12 {
-            l.record(now + i * 300, 0.9);
+            l.record_pool(now + i * 300, 0.9, traded(i as usize));
         }
         assert!(matches!(l.decide(now + EVERY_SECS, 3.5), Decision::Change { next, .. } if next == 4.0));
         // zurückgestellte Uhr: vorsichtig warten
@@ -365,7 +424,7 @@ mod tests {
         let path = path_for(&state);
         assert!(path.ends_with("mainnet-zins.json"));
         for i in 0..6 {
-            update(&path, "mainnet", |l| l.record(T0 + i * 300, 0.9)).unwrap();
+            update(&path, "mainnet", |l| l.record_pool(T0 + i * 300, 0.9, traded(i as usize))).unwrap();
         }
         // „Neustart“: frisch geladen, gleiche Messungen
         let l = load(&path, "mainnet").unwrap();
@@ -394,18 +453,18 @@ mod tests {
         let mut l = RateLog::new("mainnet");
         let wrong = T0 + 10 * 365 * 86_400;
         for i in 0..6 {
-            assert!(l.record(wrong - 5 * STEP + i * STEP, 0.9));
+            assert!(l.record_pool(wrong - 5 * STEP + i * STEP, 0.9, traded(i as usize)));
         }
         assert!(matches!(l.decide(wrong, 3.0), Decision::Change { .. }));
         assert!(l.reserve(wrong).is_some());
         // Uhr korrigiert: die erste Messung verwirft die Messungen aus der
         // „Zukunft“ und kappt den Takt auf jetzt
-        assert!(l.record(T0, 0.9));
+        assert!(l.record_pool(T0, 0.9, traded(0)));
         assert_eq!(l.last_change, Some(T0));
         assert_eq!(l.decide(T0, 3.0), Decision::Wait { secs_left: EVERY_SECS });
         // eine Stunde regelmäßig messen: dann ist die Änderung wieder erlaubt
         for i in 1..=15 {
-            assert!(l.record(T0 + i * SAMPLE_GAP_SECS, 0.9));
+            assert!(l.record_pool(T0 + i * SAMPLE_GAP_SECS, 0.9, traded(i as usize)));
         }
         let now = T0 + 15 * SAMPLE_GAP_SECS;
         assert!(matches!(l.decide(now, 3.0), Decision::Change { next, .. } if next == 3.5), "{:?}", l.decide(now, 3.0));
@@ -423,8 +482,8 @@ mod tests {
     #[test]
     fn a12_sechs_messungen_in_zwanzig_minuten_reichen_nicht() {
         let mut l = RateLog::new("mainnet");
-        for (i, v) in [1.0, 1.0, 1.006, 1.006, 1.006, 1.006].iter().enumerate() {
-            assert!(l.record(T0 + i as u64 * SAMPLE_GAP_SECS, *v));
+        for (i, v) in [1.0, 1.0, 1.04, 1.04, 1.04, 1.04].iter().enumerate() {
+            assert!(l.record_pool(T0 + i as u64 * SAMPLE_GAP_SECS, *v, traded(i)));
         }
         let now = T0 + 5 * SAMPLE_GAP_SECS;
         assert_eq!(l.decide(now, 3.0), Decision::TooShort { have: 6, span_secs: 1200 });
@@ -479,8 +538,8 @@ mod tests {
             let mut changed = false;
             for i in 0..30u64 {
                 let t = T0 + i * gap;
-                let v = if t >= T0 + start && t <= T0 + start + hold { 1.006 } else { 1.0 };
-                assert!(l.record(t, v));
+                let v = if t >= T0 + start && t <= T0 + start + hold { 1.04 } else { 1.0 };
+                assert!(l.record_pool(t, v, traded(i as usize)));
                 changed |= matches!(l.decide(t, 3.0), Decision::Change { .. });
             }
             changed
@@ -490,5 +549,59 @@ mod tests {
         }
         // Gegenprobe: 30 min gehalten ändern ihn
         assert!(run(1800, 30 * 60));
+    }
+
+    /// Audit 20 A20e-6 (Entscheidung des Betreibers „Totzone + nur bei Handel“):
+    /// Liegt der Median außerhalb der Totzone, ändert sich der Zins nur, wenn
+    /// das Tauschverhältnis des Pools sich im Fenster um ≥ 2 % bewegt hat.
+    /// Ohne Handel (reine KAS-Drift) bleibt er, in beide Richtungen.
+    #[test]
+    fn a20e_6_ohne_handel_keine_zinsaenderung() {
+        let now = T0 + 5 * STEP;
+        // KAS fällt, der Pool wird nicht gehandelt: Messung 0,95, Verhältnis fest
+        let mut l = RateLog::new("mainnet");
+        for i in 0..6 {
+            assert!(l.record_pool(T0 + i * STEP, 0.95, Some(25.0)));
+        }
+        assert_eq!(l.traded_move(now), 0.0);
+        assert!(matches!(l.decide(now, 3.0), Decision::NoTrade { have: 6, .. }), "{:?}", l.decide(now, 3.0));
+        // ebenso nach oben (über 1,03) und ohne Verhältnis (alte Messungen)
+        let mut l = RateLog::new("mainnet");
+        for i in 0..6 {
+            assert!(l.record(T0 + i * STEP, 1.05));
+        }
+        assert!(matches!(l.decide(now, 5.0), Decision::NoTrade { .. }));
+        // ein einzelner kleiner Tausch (0,5 %) reicht nicht
+        let mut l = RateLog::new("mainnet");
+        for i in 0..6 {
+            let r = if i < 3 { 25.0 } else { 25.0 * 1.005 };
+            assert!(l.record_pool(T0 + i * STEP, 0.95, Some(r)));
+        }
+        assert!(matches!(l.decide(now, 3.0), Decision::NoTrade { moved, .. } if (moved - 1.005f64.ln()).abs() < 1e-9));
+        // Handel von zusammen 2 % (z. B. Käufe Richtung Band): Zins folgt
+        let mut l = RateLog::new("mainnet");
+        for i in 0..6 {
+            let r = 25.0 * (1.0 + 0.005 * i as f64);
+            assert!(l.record_pool(T0 + i * STEP, 0.95, Some(r)));
+        }
+        assert!(l.traded_move(now) >= MIN_TRADE_MOVE);
+        assert_eq!(l.decide(now, 3.0), Decision::Change { median: 0.95, have: 6, next: 3.5 });
+        // in der Totzone hilft auch viel Handel nicht
+        let l = log_with(&[0.975, 1.025, 0.98, 1.02, 1.0, 1.0], T0, STEP);
+        assert!(matches!(l.decide(now, 3.0), Decision::Keep { .. }));
+    }
+
+    /// Das Tauschverhältnis steht in der Zinsdatei; alte Dateien ohne Feld
+    /// lassen sich lesen (Messungen zählen dann nicht als Handel)
+    #[test]
+    fn a20e_6_zinsdatei_mit_und_ohne_tauschverhaeltnis() {
+        let alt = r#"{"network":"mainnet","samples":[{"at":1,"ghostUsd":0.9}],"lastChange":null}"#;
+        let l: RateLog = serde_json::from_str(alt).unwrap();
+        assert_eq!(l.samples[0].pool_ratio, None);
+        let mut l = RateLog::new("mainnet");
+        l.record_pool(T0, 0.9, pool_ratio(250 * math::E8, 10 * math::E8));
+        let j = serde_json::to_string(&l).unwrap();
+        assert!(j.contains("\"poolRatio\":25.0"), "{j}");
+        assert_eq!(pool_ratio(1, 0), None);
     }
 }

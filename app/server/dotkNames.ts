@@ -42,7 +42,9 @@ function client(network: Network, utxos: UtxoSource, fetchImpl?: typeof fetch): 
 /** Sieht die Eingabe wie ein .k-Name aus (und nicht wie Adresse oder x-only-Schlüssel)? */
 export function looksLikeName(s: string): boolean {
   const t = s.trim().toLowerCase();
-  if (t.length === 0 || t.length > 80 || t.includes(":")) return false;
+  // wie isKName in der Seite (A20d-10): ab 3 Zeichen, kein Adressanfang
+  if (t.length < 3 || t.length > 80 || t.includes(":")) return false;
+  if ("kaspa:".startsWith(t) || "kaspatest:".startsWith(t)) return false;
   if (/^[0-9a-f]{64}$/.test(t)) return false;
   return /^[a-z0-9][a-z0-9.\-_]*$/.test(t);
 }

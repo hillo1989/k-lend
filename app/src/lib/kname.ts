@@ -4,10 +4,22 @@
 import { useEffect, useState } from "react";
 import type { NetworkId } from "../config";
 
-/** Eingabe wie ein .k-Name (keine Adresse, kein x-only-Schlüssel)? Wie looksLikeName im Server. */
+/** kürzeste Eingabe, die nachgeschlagen wird (A20d-10) */
+export const KNAME_MIN_CHARS = 3;
+/** Wartezeit nach dem letzten Tastendruck (A20d-10; vorher 400 ms) */
+export const KNAME_DEBOUNCE_MS = 700;
+
+/**
+ * Eingabe wie ein .k-Name (keine Adresse, kein x-only-Schlüssel)? Wie
+ * looksLikeName im Server. Audit 20 A20d-10: erst ab 3 Zeichen und nicht,
+ * solange die Eingabe der Anfang einer Adresse sein kann („k“, „kas“,
+ * „kaspa“, „kaspatest“ …) – sonst ginge jedes Tippfragment einer Adresse an
+ * den Server und an dotk.name.
+ */
 export function isKName(s: string): boolean {
   const t = s.trim().toLowerCase();
-  if (t.length === 0 || t.length > 80 || t.includes(":")) return false;
+  if (t.length < KNAME_MIN_CHARS || t.length > 80 || t.includes(":")) return false;
+  if ("kaspa:".startsWith(t) || "kaspatest:".startsWith(t)) return false;
   if (/^[0-9a-f]{64}$/.test(t)) return false;
   return /^[a-z0-9][a-z0-9.\-_]*$/.test(t);
 }
@@ -49,7 +61,7 @@ export function useKName(input: string, network: NetworkId): KName | null {
         .catch((e: Error) => {
           if (!ctl.signal.aborted) setState({ input: t, loading: false, error: e.message });
         });
-    }, 400);
+    }, KNAME_DEBOUNCE_MS);
     const again = window.setTimeout(() => setTick((x) => x + 1), REFRESH_MS);
     return () => {
       ctl.abort();

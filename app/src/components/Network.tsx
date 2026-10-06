@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NETWORKS, ORACLE_STALE_MINUTES } from "../config";
+import { NETWORKS, oracleStaleMinutes } from "../config";
 import { tr, useLang } from "../lib/i18n";
 import { useStatus } from "../lib/StatusContext";
 import { de, oracleStale } from "../lib/status";
@@ -32,7 +32,7 @@ export function NetworkBar() {
   else if (s.error && !s.status) pill = { text: `${net.short} · ${tr("keine Daten", "no data")}`, cls: "pill pill-err" };
   else if (!s.status) pill = { text: `${net.short} · ${tr("lädt …", "loading …")}`, cls: "pill" };
   else if (!s.status.deployed) pill = { text: `${net.short} · ${tr("v2 noch nicht angelegt", "v2 not deployed yet")}`, cls: "pill pill-warn" };
-  else if (oracleStale(s.status.oracle)) pill = { text: `${net.short} · ${tr("live, Preis veraltet", "live, price stale")}`, cls: "pill pill-warn" };
+  else if (oracleStale(s.status.oracle, s.status.signers?.freezeAfterHours)) pill = { text: `${net.short} · ${tr("live, Preis veraltet", "live, price stale")}`, cls: "pill pill-warn" };
   else pill = { text: `${net.short} · live`, cls: "pill pill-live" };
 
   // GHOST-Marktpreis aus dem Tauschpool, bewertet mit dem KAS-Marktpreis
@@ -147,10 +147,18 @@ export function StatusNotices() {
           )}
         </Callout>
       )}
-      {s.status?.deployed && oracleStale(s.status.oracle) && (
+      {s.status?.deployed && oracleStale(s.status.oracle, s.status.signers?.freezeAfterHours) && (
         <Callout kind="warn" title={tr("Orakelpreis veraltet", "Oracle price stale")}>
           {tr(`Der letzte Preis ist ${de(s.status.oracle.ageMinutes, 0)} Minuten alt`, `The last price is ${de(s.status.oracle.ageMinutes, 0)} minutes old`)}
-          {s.status.oracle.ageMinutes > ORACLE_STALE_MINUTES ? tr(` (Grenze ${ORACLE_STALE_MINUTES} min)`, ` (limit ${ORACLE_STALE_MINUTES} min)`) : ""}.
+          {s.status.oracle.ageMinutes > oracleStaleMinutes(s.status.signers?.freezeAfterHours) ? tr(` (Grenze ${oracleStaleMinutes(s.status.signers?.freezeAfterHours)} min)`, ` (limit ${oracleStaleMinutes(s.status.signers?.freezeAfterHours)} min)`) : ""}
+          {s.status.oracle.frozen
+            ? tr(" – das Orakel ist eingefroren", " – the oracle is frozen")
+            : (s.status.oracle.freezeInMinutes ?? 1) <= 0
+              ? tr(" – jeder kann es jetzt einfrieren", " – anyone can freeze it now")
+              : typeof s.status.oracle.freezeInMinutes === "number"
+                ? tr(` – einfrierbar in ${de(s.status.oracle.freezeInMinutes, 0)} min`, ` – can be frozen in ${de(s.status.oracle.freezeInMinutes, 0)} min`)
+                : ""}
+          .
           {s.status.oracle.freshError ? tr(` ghostctl meldet: ${s.status.oracle.freshError}.`, ` ghostctl reports: ${s.status.oracle.freshError}.`) : ""}{" "}
           {tr(
             "Kennzahlen, Quoten und Liquidationspreise beruhen auf diesem alten Preis. Aktualisieren im Reiter „Orakel“.",

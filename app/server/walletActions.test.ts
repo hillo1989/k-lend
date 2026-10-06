@@ -8,6 +8,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { encodeKaspaAddress } from "./kaspaAddress.ts";
 import { createGhostApi, redactPaths } from "./api.ts";
 import { ValidationError } from "./actions.ts";
 import {
@@ -26,11 +27,12 @@ import {
   WALLET_PARAMS,
 } from "./walletActions.ts";
 
-const A = "kaspa:q" + "qpzry9x8gf2tvdw0s3jn54khce6mua7l".repeat(2).slice(0, 60);
-const T = "kaspatest:q" + "qpzry9x8gf2tvdw0s3jn54khce6mua7l".repeat(2).slice(0, 60);
+// A20c-1: Testadressen mit gültiger Prüfsumme (vorher nur Zeichensatz und Länge)
+const A = encodeKaspaAddress("kaspa", 0, Array(32).fill(0x11));
+const T = encodeKaspaAddress("kaspatest", 0, Array(32).fill(0x11));
 const X = "ab".repeat(32);
 /** zweite Schnorr-Adresse (Empfänger eines Tresors) */
-const A2 = "kaspa:q" + "pzry9x8gf2tvdw0s3jn54khce6mua7lq".repeat(2).slice(0, 60);
+const A2 = encodeKaspaAddress("kaspa", 0, Array(32).fill(0x22));
 
 const plan = (extra: Record<string, unknown> = {}) => ({ kind: PLAN_KIND, network: "mainnet", address: A, action: { action: "mint", vault: 0, ghost: 1 }, ...extra });
 

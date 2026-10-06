@@ -26,7 +26,8 @@ export type SignMode = "key" | "wallet";
 
 export interface Prefill {
   action: CliAction;
-  vault?: number;
+  /** Vault über seine feste Covenant-ID (A20d-2), nicht über die verschiebbare Nummer */
+  vaultId?: string;
   nonce: number;
 }
 
@@ -88,7 +89,17 @@ export function ActionForms({
   const key = signMode === "wallet" ? walletKey : acc.selected;
 
   const [action, setAction] = useState<CliAction>(actions.includes("mint") ? "mint" : actions[0]);
-  const [vault, setVault] = useState<number | null>(null);
+  // Auswahl über die feste Covenant-ID (A20d-2). Die Nummer der Zustandsdatei
+  // verschiebt sich, wenn ein Vault mit kleinerer Nummer endet (A11-O-15);
+  // sie wird nur abgeleitet (Vorprüfung, Schlüsselmodus).
+  const [vaultId, setVaultIdRaw] = useState<string | null>(null);
+  // gewählter Vault ist verschwunden (liquidiert, geschlossen): nicht still auf einen anderen springen
+  const [vaultGone, setVaultGone] = useState(false);
+  const setVaultId = (id: string | null) => {
+    setVaultGone(false);
+    setVaultIdRaw(id);
+  };
+  const vault = vaultId === null ? null : (live?.vaults.find((v) => v.covenantId === vaultId)?.index ?? null);
   const [amountStr, setAmountStr] = useState("");
   const [amount2Str, setAmount2Str] = useState("");
   const [fullAmount, setFullAmount] = useState(true);
@@ -122,7 +133,7 @@ export function ActionForms({
   useEffect(() => {
     if (!prefill) return;
     setAction(prefill.action);
-    if (prefill.vault !== undefined) setVault(prefill.vault);
+    if (prefill.vaultId !== undefined) setVaultId(prefill.vaultId);
     setAmountStr("");
     setFullAmount(true);
     panelRef.current?.scrollIntoView({ block: "start" });
@@ -135,14 +146,20 @@ export function ActionForms({
     // „Eigener Vault“: nur Vaults des gewählten Schlüssels bzw. der Wallet.
     // Wechselt der Signierer (Wallet verbunden, Modus umgestellt), springt die
     // Auswahl auf einen eigenen Vault statt auf einem fremden stehen zu bleiben.
-    const sel = vault === null ? undefined : live.vaults.find((v) => v.index === vault);
-    const foreign = ownVaults && sel !== undefined && (key === null || sel.owner.toLowerCase() !== key.xonly.toLowerCase());
-    if (sel === undefined || foreign) {
-      const own = key ? live.vaults.find((v) => v.owner.toLowerCase() === key.xonly.toLowerCase()) : undefined;
-      const next = own?.index ?? (ownVaults ? null : (live.vaults[0]?.index ?? null));
-      if (next !== vault) setVault(next);
+    const sel = vaultId === null ? undefined : live.vaults.find((v) => v.covenantId === vaultId);
+    if (vaultId !== null && sel === undefined) {
+      // gewählter Vault besteht nicht mehr: Auswahl leeren und Hinweis zeigen
+      setVaultIdRaw(null);
+      setVaultGone(true);
+      return;
     }
-  }, [live, key, vault, ownVaults]);
+    const foreign = ownVaults && sel !== undefined && (key === null || sel.owner.toLowerCase() !== key.xonly.toLowerCase());
+    if ((sel === undefined && !vaultGone) || foreign) {
+      const own = key ? live.vaults.find((v) => v.owner.toLowerCase() === key.xonly.toLowerCase()) : undefined;
+      const next = own?.covenantId ?? (ownVaults ? null : (live.vaults[0]?.covenantId ?? null));
+      if (next !== vaultId) setVaultIdRaw(next);
+    }
+  }, [live, key, vaultId, vaultGone, ownVaults]);
   useEffect(() => {
     if (!committee || !acc.committees.some((c) => c.file === committee)) {
       const c = acc.committees.find((x) => acc.isNetworkKey(x.file)) ?? acc.committees[0];
@@ -173,7 +190,11 @@ export function ActionForms({
     if (signMode === "key" && !key) return { params: null, problem: tr("Kein Schlüssel gewählt – unter „Wallet“ eine Schlüsseldatei wählen.", "No key selected – choose a key file under “Wallet”.") };
     const p: ActionParams = signMode === "key" && key ? { key: key.file } : {};
     if (meta.vault) {
-      if (vault === null) return { params: null, problem: tr("Vault wählen.", "Choose a vault.") };
+      if (vault === null)
+        return {
+          params: null,
+          problem: vaultGone ? tr("Der gewählte Vault besteht nicht mehr (z. B. liquidiert) – bitte neu wählen.", "The selected vault no longer exists (e.g. liquidated) – please choose again.") : tr("Vault wählen.", "Choose a vault."),
+        };
       p.vault = vault;
     }
     if (meta.to) {
@@ -224,7 +245,7 @@ export function ActionForms({
     }
     if (signMode === "wallet") return toWalletParams(action, p, (i) => live?.vaults.find((v) => v.index === i)?.covenantId);
     return { params: p, problem: null };
-  }, [signMode, key, meta, vault, toMode, toKey, toFree, kname, action, useFull, amountStr, amount, amount2Str, amount2, committee, usdStr, usd, rateStr, rate, hasMessage, message, onchain]);
+  }, [signMode, key, meta, vault, vaultGone, toMode, toKey, toFree, kname, action, useFull, amountStr, amount, amount2Str, amount2, committee, usdStr, usd, rateStr, rate, hasMessage, message, onchain]);
 
   // „Alles tilgen/liquidieren“: die Schuld gehört zur Signatur, sonst bliebe ein
   // alter Probelauf nach einer Schuldänderung gültig (A10-W-11)
@@ -242,6 +263,11 @@ export function ActionForms({
     return () => window.clearTimeout(t);
   }, [checked]);
 
+  /** „Vault 2 · 1a2b3c4d“ (eigener) bzw. „Fremder Vault 1a2b3c4d“ */
+  const vaultDisplay = (v: { index: number; owner: string; covenantId: string }) => {
+    const label = vaultLabel(v, live?.vaults ?? [], key?.xonly ?? null);
+    return label.includes(v.covenantId.slice(0, 8)) ? label : `${label} · ${v.covenantId.slice(0, 8)}`;
+  };
   // Was genau gesendet wird, in Worten – für Probelauf und Bestätigung (A10-W-5)
   const summary = (() => {
     if (!built.params) return "";
@@ -251,7 +277,9 @@ export function ActionForms({
       else if (amount !== null) parts.push(`${formatUnits(amount, 8, 8)} ${meta.amount.unit}`);
     }
     if (meta.amount2 && amount2 !== null) parts.push(`${formatUnits(amount2, 8, 8)} ${meta.amount2.unit}`);
-    if (typeof built.params.vault === "number") parts.push(`Vault ${built.params.vault}`);
+    // Vault in beiden Modi nennen (A20d-2): Anzeige je Nutzer plus Anfang der Covenant-ID
+    const selV = vaultId !== null ? live?.vaults.find((v) => v.covenantId === vaultId) : undefined;
+    if (meta.vault && selV) parts.push(vaultDisplay(selV));
     if (typeof built.params.to === "string") parts.push(`→ ${built.params.to}`);
     if (action === "oracle-update" && usd !== null) parts.push(`${formatUnits(usd, 8, 8)} USD`);
     if (typeof built.params.message === "string")
@@ -383,12 +411,12 @@ export function ActionForms({
             {title ?? tr("Aktionen", "Actions")}
           </h2>
           {ownVaults && (
-            <select id={`${id}-vault`} className="head-select" aria-label={tr("Vault wählen", "Choose vault")} disabled={phase !== "idle"} value={vault === null ? "" : String(vault)} onChange={(e) => setVault(e.target.value === "" ? null : Number(e.target.value))}>
-              {vaults.length === 0 && (
-                <option value="">{ownVaults ? tr("keine eigenen Vaults – erst „Vault eröffnen“", "no own vaults – first “Open vault”") : tr("keine Vaults", "no vaults")}</option>
+            <select id={`${id}-vault`} className="head-select" aria-label={tr("Vault wählen", "Choose vault")} disabled={phase !== "idle"} value={vaultId ?? ""} onChange={(e) => setVaultId(e.target.value === "" ? null : e.target.value)}>
+              {(vaults.length === 0 || vaultId === null) && (
+                <option value="">{vaults.length > 0 ? tr("– Vault wählen –", "– choose vault –") : ownVaults ? tr("keine eigenen Vaults – erst „Vault eröffnen“", "no own vaults – first “Open vault”") : tr("keine Vaults", "no vaults")}</option>
               )}
               {vaults.map((x) => (
-                <option key={x.index} value={x.index}>
+                <option key={x.covenantId} value={x.covenantId}>
                   {vaultLabel(x, live?.vaults ?? [], key?.xonly ?? null)}
                   {!ownVaults && key && x.owner === key.xonly ? tr(" (deiner)", " (yours)") : ""}
                   {x.stale ? tr(" (gesperrt)", " (blocked)") : ""} · {de(x.collateralKas, 2)} KAS · {tr("Schuld", "Debt")} {de(x.debtGhost, 4)}
@@ -445,12 +473,12 @@ export function ActionForms({
             <div className="field">
               <label htmlFor={ids.vault}>Vault</label>
               <div className="input-wrap">
-                <select id={ids.vault} value={vault === null ? "" : String(vault)} onChange={(e) => setVault(e.target.value === "" ? null : Number(e.target.value))}>
-                  {vaults.length === 0 && (
-                    <option value="">{ownVaults ? tr("keine eigenen Vaults – erst „Vault eröffnen“", "no own vaults – first “Open vault”") : tr("keine Vaults", "no vaults")}</option>
+                <select id={ids.vault} value={vaultId ?? ""} onChange={(e) => setVaultId(e.target.value === "" ? null : e.target.value)}>
+                  {(vaults.length === 0 || vaultId === null) && (
+                    <option value="">{vaults.length > 0 ? tr("– Vault wählen –", "– choose vault –") : ownVaults ? tr("keine eigenen Vaults – erst „Vault eröffnen“", "no own vaults – first “Open vault”") : tr("keine Vaults", "no vaults")}</option>
                   )}
                   {vaults.map((x) => (
-                    <option key={x.index} value={x.index}>
+                    <option key={x.covenantId} value={x.covenantId}>
                       {vaultLabel(x, live?.vaults ?? [], key?.xonly ?? null)}
                       {!ownVaults && key && x.owner === key.xonly ? tr(" (deiner)", " (yours)") : ""}
                       {x.stale ? tr(" (gesperrt)", " (blocked)") : ""} · {de(x.collateralKas, 2)} KAS · {tr("Schuld", "Debt")} {de(x.debtGhost, 4)}
@@ -666,6 +694,11 @@ export function ActionForms({
               problem={built.problem}
               summary={summary}
               blocked={blocked}
+              vaultIdOf={(i) => live?.vaults.find((v) => v.index === i)?.covenantId}
+              vaultName={(id) => {
+                const v = live?.vaults.find((x) => x.covenantId === id);
+                return v ? vaultDisplay(v) : null;
+              }}
               onDone={(any) => {
                 if (any) {
                   refreshStatus();

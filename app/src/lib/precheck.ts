@@ -558,7 +558,7 @@ export function precheck(i: PrecheckInput): Hint[] {
         });
       }
       if (i.rateBps !== undefined && i.rateBps !== null) {
-        out.push({ level: "info", text: tr("Normalerweise passt der GHOST-Agent den Zins selbst an den GHOST-Kurs an (Median der letzten Stunde): höchstens einmal pro Stunde, in Schritten von 0,5 Prozentpunkten, zwischen 0 und 20 % p. a. Einen Satz von Hand nur in Ausnahmefällen setzen.", "Normally the GHOST agent adjusts the rate to the GHOST price by itself (median of the last hour): at most once per hour, in steps of 0.5 percentage points, between 0 and 20 % p.a. Only set a rate by hand in exceptional cases.") });
+        out.push({ level: "info", text: tr("Normalerweise passt der GHOST-Agent den Zins selbst an den GHOST-Kurs an (Median der letzten Stunde, Totzone ±3 % um 1 USD, nur bei Handel im Pool): höchstens einmal pro Stunde, in Schritten von 0,5 Prozentpunkten, zwischen 2 % (Grundzins) und 20 % p. a. Einen Satz von Hand nur in Ausnahmefällen setzen.", "Normally the GHOST agent adjusts the rate to the GHOST price by itself (median of the last hour, dead zone ±3 % around 1 USD, only when the pool was traded): at most once per hour, in steps of 0.5 percentage points, between 2 % (base rate) and 20 % p.a. Only set a rate by hand in exceptional cases.") });
         if (i.rateBps > 2_000n)
           out.push({ level: "warn", text: tr("Das liegt über dem Rahmen des GHOST-Agenten (0–20 % p. a.).", "That is above the GHOST agent's range (0–20 % p.a.).") });
       }

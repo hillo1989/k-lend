@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ASSUMED_ORACLE_INTERVAL_DAA, NATIVE, NETWORKS, PARAMS, SCENARIO_FALLBACK, STABLE_SYMBOL } from "../config";
+import { ASSUMED_ORACLE_INTERVAL_DAA, NATIVE, NETWORKS, PARAMS, RATE_RULE as R, ruleNum, SCENARIO_FALLBACK, STABLE_SYMBOL } from "../config";
 import { ActionForms, type Prefill } from "../components/ActionForms";
 import type { CliAction } from "../lib/commands";
 import { StatusNotices } from "../components/Network";
@@ -138,7 +138,7 @@ export function Vault() {
 
   // --- Live-Aktionen
   const [prefill, setPrefill] = useState<Prefill | null>(null);
-  const openAction = (action: CliAction, vault?: number) => setPrefill({ action, vault, nonce: Date.now() });
+  const openAction = (action: CliAction, vaultId?: string) => setPrefill({ action, vaultId, nonce: Date.now() });
 
 
   const overBalance = wallet.balance !== null && coll !== null && coll > wallet.balance;
@@ -222,8 +222,8 @@ export function Vault() {
           decimals={2}
           invalid={aprBps === null}
           hint={tr(
-            "Startet mit dem aktuellen Satz des Orakels. Der GHOST-Agent passt ihn höchstens stündlich an, nach dem Median seiner Kursmessungen der letzten Stunde: unter 0,995 USD je GHOST +0,5 Prozentpunkte, über 1,005 USD −0,5, zwischen 2 % (Grundzins) und 20 %.",
-            "Starts with the oracle's current rate. The GHOST agent adjusts it at most hourly, by the median of its price measurements over the last hour: below 0.995 USD per GHOST +0.5 percentage points, above 1.005 USD −0.5, between 2 % (base rate) and 20 %.",
+            `Startet mit dem aktuellen Satz des Orakels. Der GHOST-Agent passt ihn höchstens stündlich an, nach dem Median seiner Kursmessungen der letzten Stunde und nur, wenn im Pool getauscht wurde: unter ${ruleNum(R.lowUsd, "de")} USD je GHOST +${ruleNum(R.stepPp, "de")} Prozentpunkte, über ${ruleNum(R.highUsd, "de")} USD −${ruleNum(R.stepPp, "de")}, dazwischen unverändert; zwischen ${R.basePct} % (Grundzins) und ${R.maxPct} %.`,
+            `Starts with the oracle's current rate. The GHOST agent adjusts it at most hourly, by the median of its price measurements over the last hour and only if the pool was traded: below ${ruleNum(R.lowUsd, "en")} USD per GHOST +${ruleNum(R.stepPp, "en")} percentage points, above ${ruleNum(R.highUsd, "en")} USD −${ruleNum(R.stepPp, "en")}, unchanged in between; between ${R.basePct} % (base rate) and ${R.maxPct} %.`,
           )}
         />
         <p className="muted small">

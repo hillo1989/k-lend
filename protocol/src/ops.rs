@@ -33,6 +33,31 @@ pub const REGISTER_VALUE: u64 = 1_000_000_000; // 10 KAS
 /// KAS in einem Austausch-Ticket (bekommt zurück, wer es aktiviert oder aufräumt)
 pub const TICKET_VALUE: u64 = 100_000_000; // 1 KAS
 
+/// Obergrenzen der Token-Liste `Deployment::tokens` (Audit 20 A20b-1): Jede
+/// Überweisung an eine neue Adresse hängte einen Eintrag an, für ≈ 0,006 KAS
+/// Gebühr (1 KAS je Token nur gebunden), und jeder Abgleich fragte je Eintrag
+/// den Node. GHOST an fremde Empfänger (Überweisung, Prägen an Dritte) werden
+/// nur geführt, solange die Liste unter MAX_TOKENS liegt und der Empfänger
+/// weniger als MAX_TOKENS_PER_RECIPIENT Einträge hat; eigene neue Token des
+/// Handelnden (Wechselgeld, Prägen, Tausch, Liquidation) bis
+/// MAX_TOKENS_PER_OWNER. Darüber entsteht der Token trotzdem auf der Kette,
+/// nur die Zustandsdatei führt ihn nicht: der Empfänger holt ihn mit
+/// `receive` (Seite: GHOST-Suche) herein.
+pub const MAX_TOKENS: usize = 1_000;
+pub const MAX_TOKENS_PER_RECIPIENT: usize = 16;
+pub const MAX_TOKENS_PER_OWNER: usize = 64;
+
+/// Neuen Token in die Liste aufnehmen, wenn die Obergrenzen es erlauben
+/// (`own` = gehört dem, der die Tx auslöst). true = aufgenommen.
+pub fn track_token(d: &mut Deployment, t: Tracked<GhostTok>, own: bool) -> bool {
+    let of_owner = d.tokens.iter().filter(|x| x.state.owner == t.state.owner).count();
+    let ok = if own { of_owner < MAX_TOKENS_PER_OWNER } else { of_owner < MAX_TOKENS_PER_RECIPIENT && d.tokens.len() < MAX_TOKENS };
+    if ok {
+        d.tokens.push(t);
+    }
+    ok
+}
+
 /// KAS in den dauerhaften Covenant-UTXOs eines Deployments. Sie bleiben für
 /// immer gebunden; jede Fortsetzung trägt denselben Betrag weiter.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -568,6 +593,16 @@ pub fn propose(
         if (daa as i64) < due {
             return Err(format!("Notfallweg erst ab DAA {due} (letzter Preis bei DAA {})", r.state.last_daa));
         }
+        // Audit 20 A20a-1: Solange das Orakel nicht eingefroren ist, kann jeder
+        // die öffentliche Signatur des letzten Preis-Updates zusammen mit einem
+        // Orakel-`read` wiederholen; attestPrice zählt das als Lebenszeichen des
+        // Hauptsatzes und entwertet das Notfall-Ticket (nonce + 1). Bei
+        // eingefrorenem Orakel scheitert der Replay (das Register verlangt
+        // frozen = false, `read` lässt frozen = true stehen). Also erst einfrieren
+        // (jeder darf das nach der Frist), dann den Notfallweg ankündigen.
+        if !dep.oracle.state.frozen {
+            return Err("Notfallweg nur bei eingefrorenem Orakel: sonst kann jeder die letzte Preis-Signatur wiederholen und die Notfall-Ankündigung entwerten (Audit 20 A20a-1). Zuerst `ghostctl oracle-freeze` (erlaubt, sobald der Preis älter als die Einfrier-Frist ist).".into());
+        }
         dep.fallback_set.as_ref().ok_or("kein Notfallsatz bekannt")?
     } else {
         &dep.signer_set
@@ -755,7 +790,8 @@ pub fn mint(dep: &Deployment, i: usize, owner: impl Into<Signer>, amount: i64, r
     d.vaults[i].vault = track(&b, 0, v.vault.cov, new_state);
     d.oracle = track(&b, 1, dep.oracle.cov, dep.oracle.state);
     d.vaults[i].branch = track(&b, 2, v.branch.cov, v.branch.state.clone());
-    d.tokens.push(track(&b, 3, v.branch.cov, tok));
+    let own = recipient == owner.xonly().as_slice();
+    track_token(&mut d, track(&b, 3, v.branch.cov, tok), own);
     Ok((b, d))
 }
 
@@ -831,7 +867,7 @@ fn burn_op(
         d.tokens.remove(t);
     }
     if change > 0 {
-        d.tokens.push(track(&b, c_idx, v.branch.cov, change_tok));
+        track_token(&mut d, track(&b, c_idx, v.branch.cov, change_tok), true);
     }
     if !has_vault {
         d.vaults.remove(i);
@@ -1095,8 +1131,10 @@ pub fn transfer_with_payload(
     for t in spent {
         d.tokens.remove(t);
     }
+    let me = sender.xonly();
     for (n, o) in outs.into_iter().enumerate() {
-        d.tokens.push(track(&b, n as u32, cov, o));
+        let own = o.owner == me;
+        track_token(&mut d, track(&b, n as u32, cov, o), own);
     }
     Ok((b, d))
 }

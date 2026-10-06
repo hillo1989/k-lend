@@ -186,6 +186,16 @@ impl Net {
         Ok(r.into_iter().map(|e| (TransactionOutpoint::from(e.outpoint), UtxoEntry::from(e.utxo_entry))).collect())
     }
 
+    /// UTXOs mehrerer Adressen mit EINER Abfrage (store::snapshot bündelt so
+    /// den Abgleich von Vaults und Token, Audit 20 A20b-1/A20e-7)
+    pub async fn utxos_many(&self, addrs: &[Address]) -> Result<Vec<(TransactionOutpoint, UtxoEntry)>, String> {
+        if addrs.is_empty() {
+            return Ok(vec![]);
+        }
+        let r = self.client.get_utxos_by_addresses(addrs.to_vec()).await.map_err(|e| e.to_string())?;
+        Ok(r.into_iter().map(|e| (TransactionOutpoint::from(e.outpoint), UtxoEntry::from(e.utxo_entry))).collect())
+    }
+
     /// P2PK-Guthaben eines Schlüssels; höchstens `max` größte UTXOs.
     pub async fn funds(&self, k: &Keypair, max: usize) -> Result<Funds, String> {
         let spk = p2pk_spk(&xonly(k));

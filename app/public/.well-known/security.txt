@@ -1,0 +1,6 @@
+# Sicherheitslücken in K.Lend (k-lend.com) bitte vertraulich an diese Adresse melden.
+# Please report security issues in K.Lend (k-lend.com) privately to this address.
+Contact: mailto:info@k-lend.com
+Expires: 2027-10-01T00:00:00.000Z
+Preferred-Languages: de, en
+Canonical: https://k-lend.com/.well-known/security.txt

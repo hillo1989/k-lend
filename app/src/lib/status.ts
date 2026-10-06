@@ -1,6 +1,6 @@
 // Live-Zustand des Protokolls, wie ihn `ghostctl status --json` liefert
 // (über die Vite-Route /api/status, siehe vite.config.ts).
-import { ORACLE_STALE_MINUTES, type NetworkId } from "../config";
+import { oracleStaleMinutes, type NetworkId } from "../config";
 import { locale, tr } from "./i18n";
 
 export interface OracleStatus {
@@ -140,9 +140,15 @@ export async function fetchStatus(network: NetworkId, signal?: AbortSignal): Pro
   return s;
 }
 
-/** Orakelpreis zu alt oder von ghostctl als nicht frisch gemeldet. */
-export function oracleStale(o: OracleStatus): boolean {
-  return !o.fresh || o.ageMinutes > ORACLE_STALE_MINUTES;
+/**
+ * Orakelpreis zu alt, von ghostctl als nicht frisch gemeldet, eingefroren
+ * oder einfrierbar (Frist abgelaufen). `freezeAfterHours` aus
+ * status.signers (Version 4), sonst 2 h (A20d-3).
+ */
+export function oracleStale(o: OracleStatus, freezeAfterHours?: number): boolean {
+  if (!o.fresh || o.frozen) return true;
+  if (typeof o.freezeInMinutes === "number" && o.freezeInMinutes <= 0) return true;
+  return o.ageMinutes > oracleStaleMinutes(freezeAfterHours);
 }
 
 // ---- Umrechnung in die Ganzzahl-Einheiten des Vertrags (für den Rechner)

@@ -641,7 +641,10 @@ pub fn apply(dep: &Deployment, t: &PoolTx) -> Deployment {
     let mut d = dep.clone();
     d.tokens.retain(|x| !t.spent.contains(&x.outpoint));
     d.lp_tokens.retain(|x| !t.spent.contains(&x.outpoint));
-    d.tokens.extend(t.new_ghost.iter().cloned());
+    // eigene neue GHOST des Handelnden, mit Obergrenze je Besitzer (A20b-1)
+    for g in &t.new_ghost {
+        crate::ops::track_token(&mut d, g.clone(), true);
+    }
     d.lp_tokens.extend(t.new_lp.iter().cloned());
     if t.pool.is_some() || t.pending.is_none() {
         d.pool = t.pool.clone();

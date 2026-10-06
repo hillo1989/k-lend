@@ -1,0 +1,343 @@
+pragma silverscript ^0.1.0; // Sprachversion des Compilers v1.0.0 ist 0.1.0 (compiler/mod.rs:55)
+
+// SignerRegisterV5 — Unterzeichner-Register für das Preis-Orakel v5
+// (docs/v5-entwurf.md). Grundlage ist signer_register_v4.sil; geändert nach
+// Audit 20:
+//
+//   A20a-1  attestPrice liest den Orakel-EINGANG und verlangt seq + 1: eine
+//           wiederholte Preis-Signatur mit Orakel-read geht nicht mehr durch.
+//   A20e-1  Mindestabstand in Kettenzeit: attestPrice, propose und cancel
+//           verlangen, dass die Haupt-UTXO mindestens minGapDaa alt ist
+//           (this.ageDaa, relative Sperre im Konsens). Ein DAA-Rückstand des
+//           Orakels erlaubt keine Update-Serie mehr, und zwischen zwei
+//           Einträgen des Hauptsatzes hat der Wächter immer ein Fenster, in
+//           dem nur er (guardLock) die Haupt-UTXO ausgeben kann.
+//   A20e-1  Wächter: guardHash = sha256(n ‖ g0 ‖ … ‖ g(n−1)), n ≤ 3. Jeder
+//           einzelne Wächter darf sperren (locked = true, sofort, ohne Orakel
+//           in der Tx). Gesperrt sind dann attestPrice, propose des
+//           Hauptsatzes und cancel; die Sperre entwertet offene Tickets
+//           (nonce + 1). Aufheben nur über activate eines Tickets, das der
+//           Notfallsatz während der Sperre angekündigt hat (emergDelayDaa).
+//   A20a-2  cancel braucht tRot statt t (kein Patt mit t Schlüsseln). Gegen
+//           einen Dieb, der alle Schlüssel des Hauptsatzes hält, lösen
+//           Wächter und Notfallsatz das Patt (Sperre, dann Notfall-Austausch,
+//           den der Hauptsatz nicht absagen kann).
+//   A20e-2  Notfallsatz darf vorschlagen bei Stille (wie v4) ODER bei Sperre.
+//
+// Entfallen gegenüber v4: Zinsziel (payKind/payTo) und witness. Die
+// Zinskasse v4 war nie in Gebrauch (Entscheidung 04.10.2026: Zins direkt per
+// interestSpk im Vault). Ohne witness kann niemand die Haupt-UTXO ohne
+// Schlüssel oder reifes Ticket ausgeben; ihr Alter ist damit die Uhr des
+// Mindestabstands.
+//
+// Zwei Arten von UTXOs tragen die Covenant-ID des Registers (wie v4):
+//   Haupt-UTXO  (isTicket = false), genau eine, Singleton.
+//   Ticket      (isTicket = true), entsteht bei propose und trägt den
+//               angekündigten Satz, Notfallsatz und Wächtersatz.
+//
+// Signaturprüfungen (Mempool-Standardregel 15 je Eingang, statisch gezählt):
+// checkQuorum in attestPrice, propose, cancel je MAX_QUORUM = 4, dazu checkSig
+// in init und checkMsgSig in guardLock: 3 · 4 + 1 + 1 = 14.
+contract SignerRegisterV5(
+    pubkey deployer,      // nur für init (einmalig), danach ohne Rechte
+    int minSigners,       // kleinstes n eines Satzes (Vorschlag 3; Alleinbetrieb 1)
+    int minThreshold,     // kleinstes t eines Satzes (Vorschlag 2; Alleinbetrieb 1)
+    int rotDelayDaa,      // Wartezeit regulärer Austausch (Vorschlag 14 Tage = 12_096_000)
+    int emergAfterDaa,    // Stille, ab der der Notfallsatz vorschlagen darf (Vorschlag 30 Tage = 25_920_000)
+    int emergDelayDaa,    // Wartezeit Notfall-Austausch, auch unter Sperre (Vorschlag 7 Tage = 6_048_000)
+    int minGapDaa,        // Mindestalter der Haupt-UTXO für Einträge des Hauptsatzes (Vorschlag 5 min = 3_000)
+    bool initTicket, byte[32] initSetHash, byte[32] initFbHash, byte[32] initGuardHash,
+    int initNonce, bool initEmerg, bool initLocked, int initLastDaa,
+    byte[32] initOracleCov, byte[32] initOracleTpl, int initOraclePrefixLen, int initOracleSuffixLen,
+    bool initInitialized
+) {
+    bool isTicket = initTicket;
+    byte[32] setHash = initSetHash;       // Ticket: angekündigter Satz
+    byte[32] fbHash = initFbHash;         // Ticket: angekündigter Notfallsatz (0…0 = keiner)
+    byte[32] guardHash = initGuardHash;   // Ticket: angekündigte Wächter (0…0 = keine)
+    int nonce = initNonce;
+    bool emerg = initEmerg;               // Haupt: Notfall-Ticket offen; Ticket: ist Notfall-Ticket
+    bool locked = initLocked;             // Haupt: vom Wächter gesperrt
+    int lastDaa = initLastDaa;            // oracleDaa des letzten Preis-Updates
+    byte[32] oracleCov = initOracleCov;   // per init gesetzt
+    byte[32] oracleTpl = initOracleTpl;
+    int oraclePrefixLen = initOraclePrefixLen;
+    int oracleSuffixLen = initOracleSuffixLen;
+    bool initialized = initInitialized;
+
+    // muss der State-Anordnung von price_oracle_v5.sil entsprechen
+    struct OracleState {
+        int kasUsd;
+        int oracleDaa;
+        int seq;
+        int stableRate;
+        int stableIndex;
+        bool frozen;
+        int lastRateDaa;
+        int refKasUsd;
+        int candKasUsd;
+        int candSeq;
+    }
+
+    int constant MAX_SIGNERS = 7;
+    int constant MAX_QUORUM = 4;
+    int constant MAX_GUARDS = 3;
+    byte constant TAG_PRICE = 0x01;
+    byte constant TAG_ROTATE = 0x02;
+    byte constant TAG_CANCEL = 0x03;
+    byte constant TAG_EMERG = 0x04;
+    byte constant TAG_LOCK = 0x05;
+
+    function myValue(): int {
+        return tx.inputs[this.activeInputIndex].value;
+    }
+
+    // Haupt-UTXO setzt sich genau einmal mit gleichem Betrag fort.
+    function cont(): int {
+        require(OpAuthOutputCount(this.activeInputIndex) == 1);
+        int outIdx = OpAuthOutputIdx(this.activeInputIndex, 0);
+        require(tx.outputs[outIdx].value == myValue());
+        return outIdx;
+    }
+
+    function live() {
+        require(!isTicket);
+        require(initialized);
+    }
+
+    // kein Orakel-Eingang in dieser Tx (Umgehungsschutz)
+    function noOracle() {
+        require(OpCovInputCount(oracleCov) == 0);
+    }
+
+    // Grenzen eines Satzes wie v4: minSigners ≤ n ≤ 7, t ≥ minThreshold,
+    // echte Mehrheit 2t > n, t ≤ tRot ≤ n, tRot ≤ 4
+    function checkBounds(int n, int t, int tRot) {
+        require(n >= minSigners);
+        require(n <= MAX_SIGNERS);
+        require(t >= minThreshold);
+        require(2 * t > n);
+        require(tRot >= t);
+        require(tRot <= n);
+        require(tRot <= MAX_QUORUM);
+    }
+
+    function hashSet(int n, int t, int tRot, pubkey[] keys): byte[32] {
+        require(keys.length == n);
+        require(n <= MAX_SIGNERS);
+        byte[] acc = byte[](n as byte[8]) + byte[](t as byte[8]) + byte[](tRot as byte[8]);
+        for(i, 0, n, MAX_SIGNERS) {
+            acc = acc + byte[](keys[i]);
+        }
+        return sha256(acc);
+    }
+
+    // need Signaturen über digest, Schlüsselindizes streng aufsteigend und < n
+    function checkQuorum(byte[32] digest, int need, int n, pubkey[] keys, datasig[] sigs, int[] idx) {
+        require(sigs.length == need);
+        require(idx.length == need);
+        require(need <= MAX_QUORUM);
+        int last = -1;
+        for(k, 0, need, MAX_QUORUM) {
+            int j = idx[k];
+            require(j > last);
+            require(j < n);
+            require(checkMsgSig(sigs[k], digest, keys[j]));
+            last = j;
+        }
+    }
+
+    // Folgezustand der Haupt-UTXO mit nonce, emerg, locked, lastDaa
+    function keep(int o, int newNonce, bool newEmerg, bool newLocked, int newLastDaa) {
+        validateOutputState(o, State {
+            isTicket: false, setHash: setHash, fbHash: fbHash, guardHash: guardHash,
+            nonce: newNonce, emerg: newEmerg, locked: newLocked, lastDaa: newLastDaa,
+            oracleCov: oracleCov, oracleTpl: oracleTpl, oraclePrefixLen: oraclePrefixLen,
+            oracleSuffixLen: oracleSuffixLen, initialized: true
+        });
+    }
+
+    // ---------------------------------------------------------------- Einträge
+
+    // Einmalig, vom Deployer signiert: Orakel-Covenant und -Template festlegen
+    // (wie v4). Prüft dabei den Startsatz gegen die Grenzen.
+    entry init(int n, int t, int tRot, pubkey[] keys, byte[32] oCov, byte[32] oTpl, int oPre, int oSuf, sig s) {
+        require(!isTicket);
+        require(!initialized);
+        require(checkSig(s, deployer));
+        checkBounds(n, t, tRot);
+        require(hashSet(n, t, tRot, keys) == setHash);
+        require(OpCovInputCount(oCov) == 0);
+        int o = cont();
+        validateOutputState(o, State {
+            isTicket: false, setHash: setHash, fbHash: fbHash, guardHash: guardHash,
+            nonce: nonce, emerg: emerg, locked: locked, lastDaa: lastDaa,
+            oracleCov: oCov, oracleTpl: oTpl, oraclePrefixLen: oPre, oracleSuffixLen: oSuf, initialized: true
+        });
+    }
+
+    // Preis-Update: t Unterzeichner des aktuellen Satzes signieren
+    // sha256(oracleCov ‖ 0x01 ‖ kasUsd ‖ oracleDaa ‖ seq ‖ stableRate) wie v4.
+    // Neu: nicht gesperrt, Mindestalter der Haupt-UTXO, seq = Eingang + 1.
+    // Der Orakel-Ausgang muss genau den signierten Zustand tragen; Index,
+    // lastRateDaa und Referenzfelder rechnet das Orakel selbst nach.
+    entry attestPrice(int newKasUsd, int newDaa, int newSeq, int newRate, int newIndex, int newRateDaa,
+                      int newRef, int newCand, int newCandSeq,
+                      int n, int t, int tRot, pubkey[] keys, datasig[] sigs, int[] idx) {
+        live();
+        require(!locked);
+        require(this.ageDaa >= minGapDaa);
+        require(hashSet(n, t, tRot, keys) == setHash);
+        byte[] m = byte[](oracleCov) + byte[](TAG_PRICE)
+            + byte[](newKasUsd as byte[8]) + byte[](newDaa as byte[8])
+            + byte[](newSeq as byte[8]) + byte[](newRate as byte[8]);
+        checkQuorum(sha256(m), t, n, keys, sigs, idx);
+        int oIn = OpCovInputIdx(oracleCov, 0);
+        // A20a-1: das Orakel muss in dieser Tx fortschreiben (seq + 1), ein
+        // read mit wiederholten Signatur-Bytes scheitert hier
+        OracleState cur = readInputStateWithTemplate(oIn, oraclePrefixLen, oracleSuffixLen, oracleTpl);
+        require(newSeq == cur.seq + 1);
+        require(OpCovOutputCount(oracleCov) == 1);
+        validateOutputStateWithInputTemplate(
+            OpCovOutputIdx(oracleCov, 0),
+            OracleState {
+                kasUsd: newKasUsd, oracleDaa: newDaa, seq: newSeq, stableRate: newRate,
+                stableIndex: newIndex, frozen: false, lastRateDaa: newRateDaa,
+                refKasUsd: newRef, candKasUsd: newCand, candSeq: newCandSeq
+            },
+            oIn, oraclePrefixLen, oracleSuffixLen, oracleTpl
+        );
+        // ein offenes Notfall-Ticket verfällt: das Update beweist, dass der
+        // Hauptsatz lebt (wie v4; nach A20a-1 nur noch mit echtem Update)
+        int newNonce = nonce;
+        if (emerg) {
+            newNonce = nonce + 1;
+        }
+        keep(cont(), newNonce, false, false, newDaa);
+    }
+
+    // Ankündigung eines neuen Satzes (mit Notfallsatz und Wächtern).
+    //   isEmerg = false: tRot des aktuellen Satzes, nicht gesperrt; Wartezeit rotDelayDaa.
+    //   isEmerg = true:  tRot des Notfallsatzes, bei Sperre sofort, sonst nach
+    //                    emergAfterDaa ohne Preis-Update; Wartezeit emergDelayDaa.
+    // Signiert wird sha256(regCov ‖ Tag ‖ nonce+1 ‖ Ankündigung), der Payload
+    // ist genau die Ankündigung newSet ‖ newFb ‖ newGuard.
+    entry propose(int newN, int newT, int newTRot, pubkey[] newKeys, byte[32] newFb, byte[32] newGuard,
+                  bool isEmerg, int n, int t, int tRot, pubkey[] keys, datasig[] sigs, int[] idx) {
+        live();
+        noOracle();
+        require(this.ageDaa >= minGapDaa);
+        checkBounds(newN, newT, newTRot);
+        byte[32] newSet = hashSet(newN, newT, newTRot, newKeys);
+        byte[32] auth = setHash;
+        byte tag = TAG_ROTATE;
+        if (isEmerg) {
+            // unter Sperre sofort, sonst erst nach Stille (tx.daa nur als
+            // eigene Untergrenze, Locktime)
+            if (!locked) {
+                require(tx.daa >= lastDaa + emergAfterDaa);
+            }
+            checkBounds(n, t, tRot);
+            auth = fbHash;
+            tag = TAG_EMERG;
+        } else {
+            require(!locked);
+        }
+        require(hashSet(n, t, tRot, keys) == auth);
+        int newNonce = nonce + 1;
+        byte[] ann = byte[](newSet) + byte[](newFb) + byte[](newGuard);
+        require(OpTxPayloadSubstr(0, OpTxPayloadLen()) == ann);
+        byte[] m = byte[](OpInputCovenantId(this.activeInputIndex)) + byte[](tag) + byte[](newNonce as byte[8]) + ann;
+        checkQuorum(sha256(m), tRot, n, keys, sigs, idx);
+        require(OpAuthOutputCount(this.activeInputIndex) == 2);
+        int o = OpAuthOutputIdx(this.activeInputIndex, 0);
+        require(tx.outputs[o].value == myValue());
+        keep(o, newNonce, isEmerg, locked, lastDaa);
+        validateOutputState(OpAuthOutputIdx(this.activeInputIndex, 1), State {
+            isTicket: true, setHash: newSet, fbHash: newFb, guardHash: newGuard,
+            nonce: newNonce, emerg: isEmerg, locked: false, lastDaa: lastDaa,
+            oracleCov: oracleCov, oracleTpl: oracleTpl, oraclePrefixLen: oraclePrefixLen,
+            oracleSuffixLen: oracleSuffixLen, initialized: true
+        });
+    }
+
+    // Absage jedes offenen Tickets durch tRot des aktuellen Satzes (A20a-2:
+    // v4 verlangte nur t). Unter Sperre nicht möglich.
+    entry cancel(int n, int t, int tRot, pubkey[] keys, datasig[] sigs, int[] idx) {
+        live();
+        noOracle();
+        require(!locked);
+        require(this.ageDaa >= minGapDaa);
+        require(hashSet(n, t, tRot, keys) == setHash);
+        int newNonce = nonce + 1;
+        byte[] m = byte[](OpInputCovenantId(this.activeInputIndex)) + byte[](TAG_CANCEL) + byte[](newNonce as byte[8]);
+        checkQuorum(sha256(m), tRot, n, keys, sigs, idx);
+        keep(cont(), newNonce, false, false, lastDaa);
+    }
+
+    // Sperre durch einen einzelnen Wächter: signiert
+    // sha256(regCov ‖ 0x05 ‖ nonce+1). Kein Mindestalter: zwischen zwei
+    // Einträgen des Hauptsatzes kommt der Wächter immer zum Zug. Kein Orakel in
+    // der Tx (ein read-Spam auf das Orakel kann die Sperre nicht aufhalten).
+    entry guardLock(int gn, pubkey[] gkeys, int gi, datasig gs) {
+        live();
+        noOracle();
+        require(!locked);
+        require(gkeys.length == gn);
+        require(gn <= MAX_GUARDS);
+        byte[] acc = byte[](gn as byte[8]);
+        for(i, 0, gn, MAX_GUARDS) {
+            acc = acc + byte[](gkeys[i]);
+        }
+        require(sha256(acc) == guardHash);
+        require(gi >= 0);
+        require(gi < gn);
+        int newNonce = nonce + 1;
+        byte[] m = byte[](OpInputCovenantId(this.activeInputIndex)) + byte[](TAG_LOCK) + byte[](newNonce as byte[8]);
+        require(checkMsgSig(gs, sha256(m), gkeys[gi]));
+        keep(cont(), newNonce, false, true, lastDaa);
+    }
+
+    // Jeder darf ein fälliges Ticket in Kraft setzen (wie v4). Hebt eine
+    // Sperre auf: unter Sperre kann nur ein Notfall-Ticket entstanden sein.
+    entry activate(int ticketIdx) {
+        live();
+        noOracle();
+        require(OpInputCovenantId(ticketIdx) == OpInputCovenantId(this.activeInputIndex));
+        State tk = readInputState(ticketIdx);
+        require(tk.isTicket);
+        require(tk.nonce == nonce);
+        int o = cont();
+        validateOutputState(o, State {
+            isTicket: false, setHash: tk.setHash, fbHash: tk.fbHash, guardHash: tk.guardHash,
+            nonce: nonce + 1, emerg: false, locked: false, lastDaa: lastDaa,
+            oracleCov: oracleCov, oracleTpl: oracleTpl, oraclePrefixLen: oraclePrefixLen,
+            oracleSuffixLen: oracleSuffixLen, initialized: true
+        });
+    }
+
+    // Ticket ausgeben (wie v4). Die Haupt-UTXO muss in derselben Tx stehen.
+    //   lebend (gleiche nonce): erst nach der Wartezeit, und nur wenn die
+    //     Haupt-UTXO genau den aktivierten Zustand erzeugt;
+    //   abgelaufen: frei (Aufräumen).
+    entry settle(int mainIdx) {
+        require(isTicket);
+        require(OpAuthOutputCount(this.activeInputIndex) == 0);
+        require(OpInputCovenantId(mainIdx) == OpInputCovenantId(this.activeInputIndex));
+        State mn = readInputState(mainIdx);
+        require(!mn.isTicket);
+        if (mn.nonce == nonce) {
+            int delay = rotDelayDaa;
+            if (emerg) {
+                delay = emergDelayDaa;
+            }
+            require(this.ageDaa >= delay);
+            validateOutputState(OpAuthOutputIdx(mainIdx, 0), State {
+                isTicket: false, setHash: setHash, fbHash: fbHash, guardHash: guardHash,
+                nonce: nonce + 1, emerg: false, locked: false, lastDaa: mn.lastDaa,
+                oracleCov: oracleCov, oracleTpl: oracleTpl, oraclePrefixLen: oraclePrefixLen,
+                oracleSuffixLen: oracleSuffixLen, initialized: true
+            });
+        }
+    }
+}

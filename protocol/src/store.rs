@@ -207,7 +207,7 @@ pub async fn resolve_pending_with(net: &impl JournalNet, state: &Path, grace: Du
             // UTXO-Index die Eingänge noch zeigen, obwohl die Tx angenommen ist.
             // Wallet-Journale daher erst nach WALLET_UNSPENT_GRACE und nur
             // verwerfen, wenn die REST-API die Annahme nicht bestätigt.
-            let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).unwrap_or(Duration::MAX);
+            let age = journal_age(&path);
             if let Ok(Some(true)) = net.tx_accepted(txid).await {
                 take_over(state, &p, None)?;
                 return Ok(Some(format!("Letzte Wallet-Transaktion ({}, {}) war angenommen (REST-API) – Zustand übernommen.", p.action, p.txid)));
@@ -258,6 +258,25 @@ pub async fn resolve_pending_with(net: &impl JournalNet, state: &Path, grace: Du
     }
     take_over(state, &p, None)?;
     Ok(Some(format!("Letzte Transaktion ({}, {}) war angenommen – Zustand übernommen.", p.action, p.txid)))
+}
+
+/// Alter eines Journals über seine mtime. Liegt die mtime in der Zukunft (Uhr
+/// nach dem Schreiben zurückgestellt, NTP-Korrektur), zählt das Journal als
+/// gerade geschrieben, und die mtime wird auf jetzt gesetzt, damit die Frist
+/// ab jetzt läuft (Audit 20 A20b-3: vorher wurde `elapsed()` zum Fehler, das
+/// Alter `Duration::MAX`, und das Journal einer angenommenen Tx sofort
+/// verworfen). Ohne lesbare mtime bleibt es beim alten Verhalten (MAX).
+pub fn journal_age(path: &Path) -> Duration {
+    let Ok(t) = std::fs::metadata(path).and_then(|m| m.modified()) else { return Duration::MAX };
+    match t.elapsed() {
+        Ok(age) => age,
+        Err(_) => {
+            if let Ok(f) = std::fs::File::options().write(true).open(path) {
+                let _ = f.set_modified(std::time::SystemTime::now());
+            }
+            Duration::ZERO
+        }
+    }
 }
 
 /// Nur der Dateiname: Meldungen erreichen über die Wallet-Routen die
@@ -363,7 +382,7 @@ async fn resolve_wallet(
             }
         }
     }
-    let age = std::fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).unwrap_or(Duration::MAX);
+    let age = journal_age(path);
     if age >= grace {
         clear_pending(state);
         return Ok(Some(format!(
@@ -416,6 +435,160 @@ async fn follow<S>(net: &Net, t: &mut Tracked<S>, script: &ScriptPublicKey) -> R
         return Ok(true);
     }
     Ok(false)
+}
+
+/// Höchstens so viele Adressen je Node-Abfrage (get_utxos_by_addresses)
+pub const ADDR_CHUNK: usize = 100;
+
+/// UTXOs vieler Skripte aus wenigen Node-Abfragen (Audit 20 A20b-1/A20e-7:
+/// vorher eine bis zwei Abfragen je Token bzw. zwei je Vault, nacheinander).
+/// Schlüssel ist das Skript; je Skript alle UTXOs seiner Adresse.
+#[derive(Default)]
+pub struct UtxoSnap {
+    pub by_spk: std::collections::HashMap<ScriptPublicKey, Vec<(TransactionOutpoint, kaspa_consensus_core::tx::UtxoEntry)>>,
+    /// Zahl der Node-Abfragen, die der Schnappschuss gekostet hat
+    pub queries: usize,
+}
+
+impl UtxoSnap {
+    /// Nachführen wie `follow`, aber aus dem Schnappschuss: Outpoint noch da,
+    /// oder genau eine UTXO mit derselben Covenant-ID unter demselben Skript
+    pub fn follow<S>(&self, t: &mut Tracked<S>, script: &ScriptPublicKey) -> bool {
+        let list = self.by_spk.get(script).map(Vec::as_slice).unwrap_or(&[]);
+        if list.iter().any(|(o, _)| *o == t.outpoint) {
+            return true;
+        }
+        let cands: Vec<_> = list.iter().filter(|(_, e)| e.covenant_id == Some(t.cov)).collect();
+        if cands.len() == 1 {
+            t.outpoint = cands[0].0;
+            t.value = cands[0].1.amount;
+            return true;
+        }
+        false
+    }
+
+    /// Antworten des Nodes einsortieren (nur Einträge, deren Skript gefragt war)
+    pub fn add(&mut self, wanted: &std::collections::HashSet<ScriptPublicKey>, utxos: Vec<(TransactionOutpoint, kaspa_consensus_core::tx::UtxoEntry)>) {
+        for (o, e) in utxos {
+            if wanted.contains(&e.script_public_key) {
+                self.by_spk.entry(e.script_public_key.clone()).or_default().push((o, e));
+            }
+        }
+    }
+}
+
+/// Zahl der Node-Abfragen für `n` verschiedene Adressen
+pub fn snapshot_queries(n: usize) -> usize {
+    n.div_ceil(ADDR_CHUNK)
+}
+
+/// Schnappschuss der UTXOs zu `spks`: Adressen gebündelt, je ADDR_CHUNK eine Abfrage
+pub async fn snapshot(net: &Net, spks: &[ScriptPublicKey]) -> Result<UtxoSnap, String> {
+    let wanted: std::collections::HashSet<ScriptPublicKey> = spks.iter().cloned().collect();
+    let mut addrs = vec![];
+    let mut seen = std::collections::HashSet::new();
+    for s in &wanted {
+        let a = net.address_of_spk(s)?;
+        if seen.insert(a.to_string()) {
+            addrs.push(a);
+        }
+    }
+    let mut snap = UtxoSnap::default();
+    for chunk in addrs.chunks(ADDR_CHUNK) {
+        snap.add(&wanted, net.utxos_many(chunk).await?);
+        snap.queries += 1;
+    }
+    Ok(snap)
+}
+
+/// Welche Token ein Abgleich prüft (Audit 20 A20b-1)
+#[derive(Clone, Debug, PartialEq)]
+pub enum TokenSync {
+    /// alle (Status, Terminal, Wallet-Senden)
+    All,
+    /// die Token dieser Besitzer, dazu reihum höchstens `foreign` fremde ab
+    /// Position `start` (Agent: eigene Token jede Runde, fremde verteilt)
+    Owners { owners: Vec<Vec<u8>>, foreign: usize, start: usize },
+    /// keine (Orakel-Runde)
+    None,
+}
+
+/// Umfang eines Abgleichs. `full()` wie bisher `resync`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SyncScope {
+    pub vaults: bool,
+    pub tokens: TokenSync,
+}
+
+impl SyncScope {
+    pub fn full() -> Self {
+        SyncScope { vaults: true, tokens: TokenSync::All }
+    }
+    /// Orakel, Register, Factory, Wurzel – was ein Preis-Update braucht
+    /// (Audit 20 A20e-7: das Orakel-Update kommt vor dem Vault-Abgleich)
+    pub fn core() -> Self {
+        SyncScope { vaults: false, tokens: TokenSync::None }
+    }
+}
+
+/// Indizes der Token in `tokens`, die ein Abgleich mit `sel` prüft (ohne Netz, testbar)
+pub fn tokens_to_check(tokens: &[Tracked<GhostTok>], sel: &TokenSync) -> Vec<usize> {
+    match sel {
+        TokenSync::All => (0..tokens.len()).collect(),
+        TokenSync::None => vec![],
+        TokenSync::Owners { owners, foreign, start } => {
+            let mut own: Vec<usize> = vec![];
+            let mut other: Vec<usize> = vec![];
+            for (i, t) in tokens.iter().enumerate() {
+                if owners.iter().any(|o| *o == t.state.owner) {
+                    own.push(i);
+                } else {
+                    other.push(i);
+                }
+            }
+            if !other.is_empty() {
+                let n = other.len();
+                let s = start % n;
+                own.extend((0..(*foreign).min(n)).map(|k| other[(s + k) % n]));
+            }
+            own.sort_unstable();
+            own
+        }
+    }
+}
+
+/// Token `check` aus dem Schnappschuss nachführen; nicht mehr vorhandene
+/// entfernen. Ohne Netz, testbar. Rückgabe: Hinweise.
+pub fn apply_token_snapshot(tokens: &mut Vec<Tracked<GhostTok>>, check: &[usize], snap: &UtxoSnap) -> Vec<String> {
+    let mut notes = vec![];
+    let mut gone = vec![];
+    for &i in check {
+        let t = &mut tokens[i];
+        let ts = spk(&t.state.artifact());
+        if !snap.follow(t, &ts) {
+            notes.push(format!("GHOST-UTXO ({:.8}) nicht mehr vorhanden – entfernt.", t.state.amount as f64 / 1e8));
+            gone.push(i);
+        }
+    }
+    for i in gone.into_iter().rev() {
+        tokens.remove(i);
+    }
+    notes
+}
+
+/// Token gebündelt abgleichen. Ein Fehler (Node) lässt die Liste unverändert
+/// und wird zum Hinweis: Die Runde des Agenten fällt nie wegen fremder Token
+/// aus (A20b-1).
+async fn resync_tokens(net: &Net, d: &mut Deployment, sel: &TokenSync) -> Vec<String> {
+    let check = tokens_to_check(&d.tokens, sel);
+    if check.is_empty() {
+        return vec![];
+    }
+    let spks: Vec<ScriptPublicKey> = check.iter().map(|&i| spk(&d.tokens[i].state.artifact())).collect();
+    match snapshot(net, &spks).await {
+        Ok(snap) => apply_token_snapshot(&mut d.tokens, &check, &snap),
+        Err(e) => vec![format!("GHOST-Token nicht abgeglichen ({e}) – Stand von vorher, nächster Abgleich holt es nach.")],
+    }
 }
 
 /// Bestätigt am Node: Die UTXO `op` liegt unter `script` und trägt die Covenant
@@ -557,7 +730,11 @@ pub fn reconcile_register(d: &mut Deployment, before: &RegisterState) -> Vec<Str
     let mut notes = vec![];
     let now = d.register.state.clone();
     let mut adopted = false;
-    if now.set_hash != before.set_hash {
+    // aktiviert ist ein Austausch, wenn sich Satz ODER Notfallsatz ändert: Ein
+    // Nachtrag des Notfallsatzes behält den Satz (GHOST-Notfallsatz.command);
+    // aktivierte ihn ein Dritter, galt die eigene Ankündigung sonst als
+    // abgesagt und der Notfallsatz kam nie in die Datei (Audit 20)
+    if now.set_hash != before.set_hash || now.fb_hash != before.fb_hash {
         let mine = d.rotation.clone().filter(|r| {
             r.set.hash().as_slice() == now.set_hash.as_slice() && r.fallback.as_ref().map(|f| f.hash().to_vec()).unwrap_or(vec![0; 32]) == now.fb_hash
         });
@@ -608,6 +785,13 @@ pub fn reconcile_register(d: &mut Deployment, before: &RegisterState) -> Vec<Str
 /// wird über die Kette nachgeführt; nur wenn das scheitert, bleibt ein Vault
 /// als `stale` gesperrt.
 pub async fn resync(net: &Net, d: &mut Deployment) -> Result<Vec<String>, String> {
+    resync_with(net, d, &SyncScope::full()).await
+}
+
+/// `resync` im Umfang `scope`: Orakel, Register, Factory und Wurzel immer;
+/// Vaults und Token nur, wenn verlangt, und gebündelt (eine Node-Abfrage je
+/// ADDR_CHUNK Adressen statt je UTXO, Audit 20 A20b-1/A20e-7).
+pub async fn resync_with(net: &Net, d: &mut Deployment, scope: &SyncScope) -> Result<Vec<String>, String> {
     let mut notes = vec![];
     let oscript = spk(&oracle(&d.oracle_params, &d.oracle.state));
     let before = d.oracle.outpoint;
@@ -654,12 +838,14 @@ pub async fn resync(net: &Net, d: &mut Deployment) -> Result<Vec<String>, String
             notes.push("GHOST-Wurzel-Minter nicht auffindbar.".into());
         }
     }
-    if let Some(vp) = d.vault_params.clone() {
+    if let (true, Some(vp)) = (scope.vaults, d.vault_params.clone()) {
         let mut ended = vec![];
-        for i in 0..d.vaults.len() {
-            let vs = spk(&vault(&vp, &d.vaults[i].owner, &d.vaults[i].vault.state));
-            let bs = spk(&d.vaults[i].branch.state.artifact());
-            let mut v_ok = follow(net, &mut d.vaults[i].vault, &vs).await?;
+        let scripts: Vec<(ScriptPublicKey, ScriptPublicKey)> =
+            d.vaults.iter().map(|v| (spk(&vault(&vp, &v.owner, &v.vault.state)), spk(&v.branch.state.artifact()))).collect();
+        let all: Vec<ScriptPublicKey> = scripts.iter().flat_map(|(a, b)| [a.clone(), b.clone()]).collect();
+        let snap = snapshot(net, &all).await?;
+        for (i, (vs, bs)) in scripts.iter().enumerate() {
+            let mut v_ok = snap.follow(&mut d.vaults[i].vault, vs);
             if !v_ok {
                 // von anderen verändert: über die Kette nachführen
                 match chain_vault(net, d, i).await {
@@ -685,7 +871,7 @@ pub async fn resync(net: &Net, d: &mut Deployment) -> Result<Vec<String>, String
                 }
             }
             let v = &mut d.vaults[i];
-            let b_ok = follow(net, &mut v.branch, &bs).await?;
+            let b_ok = snap.follow(&mut v.branch, bs);
             if v_ok && b_ok {
                 if v.stale {
                     notes.push(format!("Vault {i} ist wieder aktuell."));
@@ -699,16 +885,7 @@ pub async fn resync(net: &Net, d: &mut Deployment) -> Result<Vec<String>, String
             d.vaults.remove(i);
         }
     }
-    let mut keep = vec![];
-    for mut t in std::mem::take(&mut d.tokens) {
-        let ts = spk(&t.state.artifact());
-        if follow(net, &mut t, &ts).await? {
-            keep.push(t);
-        } else {
-            notes.push(format!("GHOST-UTXO ({:.8}) nicht mehr vorhanden – entfernt.", t.state.amount as f64 / 1e8));
-        }
-    }
-    d.tokens = keep;
+    notes.extend(resync_tokens(net, d, &scope.tokens).await);
     Ok(notes)
 }
 
@@ -973,5 +1150,99 @@ mod tests {
         let _a = lock(&state, Duration::ZERO).unwrap();
         let e = lock(&state, Duration::from_millis(10)).err().unwrap();
         assert!(e.contains("mainnet.lock") && !e.contains(&*dir.to_string_lossy()), "{e}");
+    }
+
+    /// Audit 20 A20b-3: mtime des Journals in der Zukunft (Uhr nach dem
+    /// Schreiben zurückgestellt) – das Journal gilt als frisch, die Frist
+    /// läuft ab jetzt; vorher wurde es sofort verworfen
+    #[tokio::test]
+    async fn a20b_3_journal_mit_zukuenftiger_mtime_wird_nicht_verworfen() {
+        let (_d, state, tx) = journal("a20b3", true);
+        let first = tx.inputs[0].previous_outpoint;
+        let net = Fake { utxos: vec![first], mempool: Ok(false), accepted: Ok(None), spender: Ok(None) };
+        let path = pending_path(&state);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(std::time::SystemTime::now() + Duration::from_secs(300)).unwrap();
+        assert_eq!(journal_age(&path), Duration::ZERO);
+        // die mtime steht danach auf jetzt, nicht mehr in der Zukunft
+        let m = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(m <= std::time::SystemTime::now() + Duration::from_secs(1));
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(std::time::SystemTime::now() + Duration::from_secs(300)).unwrap();
+        let e = resolve_pending_with(&net, &state, Duration::from_secs(180)).await.unwrap_err();
+        assert!(e.contains("noch nicht geklärt"), "{e}");
+        assert!(path.exists(), "Journal bleibt");
+        // ebenso im Schritt 4 (alles weg, REST weiß nichts)
+        let (_d2, state2, _) = journal("a20b3b", true);
+        let p2 = pending_path(&state2);
+        std::fs::File::options().write(true).open(&p2).unwrap().set_modified(std::time::SystemTime::now() + Duration::from_secs(300)).unwrap();
+        assert!(resolve_pending_with(&gone(), &state2, Duration::from_secs(180)).await.is_err());
+        assert!(p2.exists());
+        assert_eq!(journal_age(Path::new("/gibt/es/nicht")), Duration::MAX);
+    }
+
+    fn tok(owner: u8, amount: i64, n: u8) -> Tracked<GhostTok> {
+        Tracked { outpoint: TransactionOutpoint::new(Hash::from_bytes([n; 32]), 0), value: 100_000_000, cov: Hash::from_bytes([7; 32]), state: GhostTok::to_pubkey(&[owner; 32], amount) }
+    }
+
+    /// Audit 20 A20b-1: der Keeper prüft die eigenen Token jede Runde, fremde
+    /// reihum; alle kommen nacheinander dran
+    #[test]
+    fn a20b_1_eigene_token_immer_fremde_reihum() {
+        let tokens: Vec<_> = (0..10u8).map(|i| tok(if i % 3 == 0 { 1 } else { 2 + i }, 1, i)).collect();
+        let own = vec![vec![1u8; 32]];
+        assert_eq!(tokens_to_check(&tokens, &TokenSync::All).len(), 10);
+        assert!(tokens_to_check(&tokens, &TokenSync::None).is_empty());
+        let mut seen = std::collections::HashSet::new();
+        for round in 0..4 {
+            let sel = TokenSync::Owners { owners: own.clone(), foreign: 2, start: round * 2 };
+            let c = tokens_to_check(&tokens, &sel);
+            for i in [0, 3, 6, 9] {
+                assert!(c.contains(&i), "eigener Token {i} in Runde {round}");
+            }
+            assert_eq!(c.len(), 4 + 2, "{c:?}");
+            seen.extend(c);
+        }
+        assert_eq!(seen.len(), 10, "nach 3 Runden war jeder fremde Token dran");
+        // mehr verlangt als vorhanden: jeder höchstens einmal
+        let c = tokens_to_check(&tokens, &TokenSync::Owners { owners: own, foreign: 100, start: 5 });
+        assert_eq!(c.len(), 10);
+    }
+
+    /// A20b-1/A20e-7: Nachführen aus einem Schnappschuss (eine Abfrage je 100
+    /// Adressen statt je UTXO): vorhanden, verschoben (gleiche Covenant-ID),
+    /// verschwunden; nicht geprüfte Token bleiben unberührt
+    #[test]
+    fn a20b_1_token_aus_dem_schnappschuss() {
+        let mut tokens = vec![tok(1, 5, 1), tok(2, 6, 2), tok(3, 7, 3), tok(4, 8, 4)];
+        let spk_of = |t: &Tracked<GhostTok>| spk(&t.state.artifact());
+        let entry = |t: &Tracked<GhostTok>, cov: Hash, amount: u64| kaspa_consensus_core::tx::UtxoEntry {
+            amount,
+            script_public_key: spk_of(t),
+            block_daa_score: 1,
+            is_coinbase: false,
+            covenant_id: Some(cov),
+        };
+        let wanted: std::collections::HashSet<ScriptPublicKey> = tokens[..3].iter().map(spk_of).collect();
+        let mut snap = UtxoSnap::default();
+        let moved = TransactionOutpoint::new(Hash::from_bytes([9; 32]), 1);
+        snap.add(
+            &wanted,
+            vec![
+                (tokens[0].outpoint, entry(&tokens[0], tokens[0].cov, 100_000_000)),
+                (moved, entry(&tokens[1], tokens[1].cov, 120_000_000)),
+                // fremde Covenant-ID unter demselben Skript zählt nicht
+                (TransactionOutpoint::new(Hash::from_bytes([8; 32]), 0), entry(&tokens[2], Hash::from_bytes([1; 32]), 1)),
+                // nicht gefragtes Skript wird ignoriert
+                (tokens[3].outpoint, entry(&tokens[3], tokens[3].cov, 1)),
+            ],
+        );
+        let notes = apply_token_snapshot(&mut tokens, &[0, 1, 2], &snap);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[1].outpoint, moved);
+        assert_eq!(tokens[1].value, 120_000_000);
+        assert_eq!(tokens[2].state.amount, 8, "nicht geprüft, bleibt");
+        assert_eq!(snapshot_queries(0), 0);
+        assert_eq!(snapshot_queries(2_000), 20, "2 000 Token: 20 statt 2 000–4 000 Abfragen");
+        assert_eq!(SyncScope::core(), SyncScope { vaults: false, tokens: TokenSync::None });
     }
 }

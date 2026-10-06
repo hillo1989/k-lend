@@ -9,7 +9,7 @@
 import type { NetworkId } from "../config";
 import type { ActionParams, CliAction } from "../lib/commands";
 import type { KeyEntry } from "../lib/api";
-import { tr } from "../lib/i18n";
+import { getLang, tr } from "../lib/i18n";
 import { addressProblem, kaswareSigner, kastleSigner, reportLines, type AttachResult, type ExportResult, type KaswareSignApi, type KastleSignApi } from "../probe/probe";
 import type { WalletKind } from "./providers";
 
@@ -112,6 +112,14 @@ export function walletKeyEntry(address: string, xonly: string | null, balanceSom
   };
 }
 
+/**
+ * Art eines Ausgangs (A20d-9). ghostctl liefert bisher nur den deutschen Text
+ * `what`; ein stabiles Feld `kind` ("other" | "self" | "covenant") wertet die
+ * Seite aus, sobald es da ist (protocol: wallet_ops.rs describe_with).
+ */
+export type OutputKind = "other" | "self" | "covenant";
+export type PlanOutput = ExportResult["outputs"][number] & { kind?: OutputKind };
+
 export interface BuildResult {
   ok: boolean;
   error?: string;
@@ -121,7 +129,7 @@ export interface BuildResult {
   network?: NetworkId;
   address?: string;
   feeSompi?: number;
-  outputs?: ExportResult["outputs"];
+  outputs?: PlanOutput[];
   signInputs?: ExportResult["signInputs"];
   kastle?: ExportResult["kastle"];
   kasware?: ExportResult["kasware"];
@@ -190,6 +198,94 @@ export function planProblem(b: BuildResult, network: NetworkId, address: string)
 /** Ausgänge an fremde Adressen (zur Anzeige vor dem Signieren) */
 export function foreignOutputs(b: BuildResult, address: string): NonNullable<BuildResult["outputs"]> {
   return (b.outputs ?? []).filter((o) => o.address !== address && !o.what.startsWith("Vertrag"));
+}
+
+/** Art eines Ausgangs: `kind` von ghostctl, sonst aus dem deutschen Text (A20d-9) */
+export function outputKind(o: PlanOutput, address: string): OutputKind {
+  if (o.kind === "other" || o.kind === "self" || o.kind === "covenant") return o.kind;
+  if (o.what === "andere Adresse") return "other";
+  if (o.address === address || /^(Wechselgeld an die Wallet|an die Wallet|Rest des Tresors zurück an die Wallet)$/.test(o.what)) return "self";
+  return "covenant";
+}
+
+/** Zahlungen an fremde P2PK-Adressen – stehen vor dem Signieren immer offen da */
+export function payeeOutputs(b: BuildResult, address: string): PlanOutput[] {
+  return (b.outputs ?? []).filter((o) => o.address !== address && outputKind(o, address) === "other");
+}
+
+/** englische Fassung der Ausgangstexte von ghostctl (A20d-9); unbekannte bleiben deutsch */
+const WHAT_EN: [RegExp, string][] = [
+  [/^andere Adresse$/, "other address"],
+  [/^Wechselgeld an die Wallet$/, "change to the wallet"],
+  [/^an die Wallet$/, "to the wallet"],
+  [/^Rest des Tresors zurück an die Wallet$/, "rest of the vault back to the wallet"],
+  [/^Vertrag \(Covenant\)$/, "contract (covenant)"],
+  [/^GHOST-Wurzel \(läuft weiter\)$/, "GHOST root (continues)"],
+  [/^Minter-Zweig deines Vaults (\S+) \(läuft weiter\)$/, "minter branch of your vault $1 (continues)"],
+  [/^Minter-Zweig des fremden Vaults (\S+) \(läuft weiter\)$/, "minter branch of the other vault $1 (continues)"],
+  [/^Minter-Zweig des neuen Vaults – (.+), bleiben dauerhaft gebunden$/, "minter branch of the new vault – $1, stays locked permanently"],
+  [/^GHOST-Token – (.+) stecken darin und kommen beim Weitergeben bzw\. Tilgen zurück$/, "GHOST token – holds $1, which comes back when passing it on or repaying"],
+  [/^Dein neuer Vault – Sicherheit (.+)$/, "your new vault – collateral $1"],
+  [/^Dein neuer Tresor – (.+?), zahlt (.+) an (\S+)$/, "your new vault – $1, pays $2 to $3"],
+  [/^Dein Tresor (\S+) – (.+?), zahlt (.+) an (\S+)$/, "your vault $1 – $2, pays $3 to $4"],
+  [/^Tresor (\S+) \(läuft weiter\)$/, "vault $1 (continues)"],
+];
+export function outputWhat(what: string): string {
+  if (getLang() !== "en") return what;
+  for (const [re, en] of WHAT_EN) if (re.test(what)) return what.replace(re, en);
+  return what;
+}
+
+const norm = (s: unknown) => (typeof s === "string" ? s.trim().toLowerCase() : null);
+
+/**
+ * Empfänger laut Plan (ghostctl wallet build: plan.action.to) für send,
+ * transfer und tresor-open; sonst null (A20d-8).
+ */
+export function planRecipient(b: BuildResult): string | null {
+  const a = b.plan?.action as { to?: unknown } | undefined;
+  return a && typeof a.to === "string" ? a.to.trim() : null;
+}
+
+/**
+ * Passt der Plan zu dem, was der Nutzer eingegeben hat (A20d-8, A20d-2)?
+ * - send/transfer/tresor-open: plan.action.to muss params.to sein; beim
+ *   Senden muss eine Zahlung genau an diese Adresse unter den Ausgängen
+ *   stehen, beim Tresor der neue Tresor diese Adresse nennen.
+ * - Aktionen an einem Vault: Die Nummer im Plan (plan.action.vault, Nummer
+ *   der Zustandsdatei des Servers) muss laut Status zur gewählten
+ *   Covenant-ID gehören. Weicht etwas ab, wird nicht signiert.
+ * `vaultIdOf`: Nummer → Covenant-ID aus dem Status (unbekannt: undefined).
+ */
+export function planMismatch(b: BuildResult, action: WalletActionName, params: ActionParams, address: string, vaultIdOf?: (index: number) => string | undefined): string | null {
+  if (!b.ok || !b.plan) return null;
+  if (action === "send" || action === "transfer" || action === "tresor-open") {
+    const want = norm(params.to);
+    const got = norm(planRecipient(b));
+    if (!got) return tr("Der Plan nennt keinen Empfänger – nicht signieren, bitte erneut prüfen.", "The plan names no recipient – do not sign, check again.");
+    if (want !== got) return tr(`Empfänger im Plan (${planRecipient(b)}) weicht von deiner Eingabe ab – nicht signieren.`, `Recipient in the plan (${planRecipient(b)}) differs from your input – do not sign.`);
+    if (action === "send" && !payeeOutputs(b, address).some((o) => norm(o.address) === want))
+      return tr("Keine Zahlung an den Empfänger unter den Ausgängen – nicht signieren.", "No payment to the recipient among the outputs – do not sign.");
+    if (action === "tresor-open" && !(b.outputs ?? []).some((o) => o.what.toLowerCase().includes(want!)))
+      return tr("Der neue Tresor im Plan nennt einen anderen Empfänger – nicht signieren.", "The new vault in the plan names another recipient – do not sign.");
+  }
+  if (typeof params.vault === "string" && vaultIdOf) {
+    const idx = (b.plan.action as { vault?: unknown } | undefined)?.vault;
+    if (typeof idx !== "number") return tr("Der Plan nennt keinen Vault – nicht signieren.", "The plan names no vault – do not sign.");
+    const id = vaultIdOf(idx);
+    if (id === undefined) return tr("Der Vault-Stand hat sich geändert – Status wird neu geladen, dann erneut prüfen.", "The vault state changed – status is reloading, then check again.");
+    if (id.toLowerCase() !== params.vault.toLowerCase()) return tr("Der Plan betrifft einen anderen Vault als gewählt – nicht signieren, erneut prüfen.", "The plan concerns a different vault than selected – do not sign, check again.");
+  }
+  return null;
+}
+
+/**
+ * Unklar-Sperre im Wallet-Ablauf (A20d-1) wie im Schlüsselmodus (A10-W-2):
+ * nach einem Senden mit unklarem Ausgang bleiben Prüfen, Signieren und
+ * Senden gesperrt, bis ein Status geladen ist, der NACH dem Vorfall begann.
+ */
+export function unclearLocked(unclearAt: number | null, updatedAt: number | null): boolean {
+  return unclearAt !== null && (updatedAt ?? 0) <= unclearAt;
 }
 
 /** Signieren in der Wallet; Rückgabe: signierte Tx als JSON-Text. Sendet nicht. */

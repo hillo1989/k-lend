@@ -28,8 +28,8 @@ const facts = () => [
   {
     title: tr("Tauschpool und Marktpreis", "Swap pool and market price"),
     text: tr(
-      "Im Pool tauschst du KAS und GHOST direkt auf L1, sein Kurs ist der Marktpreis von GHOST. Liegt er unter 1 USD, steigt der Zins automatisch, darüber sinkt er. Dazu kann jeder GHOST zu 1 USD (minus 1 %) gegen KAS zurückgeben.",
-      "In the pool you swap KAS and GHOST directly on L1; its price is the market price of GHOST. Below 1 USD the interest rate rises automatically, above it falls. On top, anyone can redeem GHOST for KAS at 1 USD (minus 1 %).",
+      "Im Pool tauschst du KAS und GHOST direkt auf L1, sein Kurs ist der Marktpreis von GHOST. Liegt er mehr als 3 % unter 1 USD, steigt der Zins automatisch, mehr als 3 % darüber sinkt er. Dazu kann jeder GHOST zu 1 USD (minus 1 %) gegen KAS zurückgeben.",
+      "In the pool you swap KAS and GHOST directly on L1; its price is the market price of GHOST. More than 3 % below 1 USD the interest rate rises automatically, more than 3 % above it falls. On top, anyone can redeem GHOST for KAS at 1 USD (minus 1 %).",
     ),
     icon: "M3 17l6-6 4 4 8-8M15 7h6v6",
   },
@@ -152,10 +152,15 @@ export function Landing() {
           </li>
           <li>
             <strong>{tr("Prüfen, dann senden.", "Check, then send.")}</strong>{" "}
-            {tr(
-              "Jede Aktion läuft erst als Probelauf mit Gebühr und Ergebnis. Danach signiert und sendet der lokale Server sie mit ghostctl. Im Mainnet ist zusätzlich eine ausdrückliche Bestätigung nötig.",
-              "Every action first runs as a dry run showing fee and result. Then the local server signs and sends it with ghostctl. On mainnet an explicit confirmation is required as well.",
-            )}
+            {pub
+              ? tr(
+                  "Zu jeder Aktion baut der Server erst einen Plan mit Gebühr und Ausgängen; nichts wird gesendet. Du signierst ihn in deiner Wallet, der Server prüft die Signatur, und gesendet wird erst auf deinen Knopfdruck. Im Mainnet ist dafür eine ausdrückliche Bestätigung nötig.",
+                  "For every action the server first builds a plan showing fee and outputs; nothing is sent. You sign it in your wallet, the server checks the signature, and it is sent only when you press the button. On mainnet an explicit confirmation is required.",
+                )
+              : tr(
+                  "Jede Aktion läuft erst als Probelauf mit Gebühr und Ergebnis. Danach signiert und sendet der lokale Server sie mit ghostctl. Im Mainnet ist zusätzlich eine ausdrückliche Bestätigung nötig.",
+                  "Every action first runs as a dry run showing fee and result. Then the local server signs and sends it with ghostctl. On mainnet an explicit confirmation is required as well.",
+                )}
           </li>
         </ol>
       </section>

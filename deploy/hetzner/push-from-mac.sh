@@ -6,7 +6,12 @@
 #   deploy/hetzner/push-from-mac.sh root@<server-ip> --zustand-ueberschreiben
 #                                                                     + Zustandsdateien ersetzen (Agent dort muss aus sein)
 #
-# Danach auf dem Server: bash /opt/ghost/kaspa-lending/deploy/hetzner/setup.sh
+# Danach auf dem Server: bash /root/ghost-deploy/setup.sh
+#
+# deploy/hetzner/ (setup.sh, Vorlagen) kommt zusätzlich nach /root/ghost-deploy:
+# root-eigen, nur für root les- und schreibbar. Nur von dort führt root das
+# Skript und die systemd-Vorlagen aus (Audit 20 A20c-2) – die Kopie im
+# Code-Ordner gehört dem Dienstbenutzer ghost.
 #
 # Nie kopiert: keys/ (dafür keys-upload.sh), node_modules, Build-Ordner,
 # .git, und deployments/ (außer mit --zustand). Was auf dem Server unter
@@ -41,7 +46,15 @@ rsync -az --delete \
   --exclude '/deploy/hetzner/generated/' \
   --exclude '*.tsbuildinfo' \
   ./ "$SERVER:$REMOTE_DIR/"
-ssh "$SERVER" "install -d -m 750 '$REMOTE_DIR/deployments'; if id ghost >/dev/null 2>&1; then chown -R ghost:ghost '$REMOTE_DIR'; fi"
+# deployments/ nur anlegen, nie die Rechte ändern (2770 für Agent und Seite, A20c-3)
+ssh "$SERVER" "[ -d '$REMOTE_DIR/deployments' ] || install -d -m 2770 '$REMOTE_DIR/deployments'; if id ghost >/dev/null 2>&1; then chown -R ghost:ghost '$REMOTE_DIR'; fi"
+echo "   ok"
+
+echo "== Skript und Vorlagen nach $SERVER:/root/ghost-deploy (gehört root, A20c-2)"
+# frisch ausgepackt in einen Nachbarordner, dann ausgetauscht; keine
+# Verknüpfungen, Besitzer root, Rechte 700/600
+COPYFILE_DISABLE=1 tar -C deploy/hetzner --exclude generated --exclude .DS_Store --no-mac-metadata --no-xattrs -cf - . |
+  ssh "$SERVER" 'set -e; umask 077; neu=$(mktemp -d /root/ghost-deploy.neu.XXXXXX); tar -C "$neu" --no-same-owner --no-same-permissions -xf -; find "$neu" -type l -delete; chown -R root:root "$neu"; chmod -R go-rwx "$neu"; rm -rf /root/ghost-deploy; mv "$neu" /root/ghost-deploy'
 echo "   ok"
 
 if [ -n "$MODE" ]; then
@@ -56,7 +69,8 @@ if [ -n "$MODE" ]; then
       echo "   $f gibt es auf dem Server schon – bleibt (ersetzen: --zustand-ueberschreiben)"
       continue
     fi
-    ssh "$SERVER" "umask 027; cat > '$REMOTE_DIR/$f.upload' && mv '$REMOTE_DIR/$f.upload' '$REMOTE_DIR/$f' && if id ghost >/dev/null 2>&1; then chown ghost:ghost '$REMOTE_DIR/$f'; fi" < "$f"
+    # 660: Agent (ghost) und Seite (ghost-web, Gruppe ghost) schreiben die Datei fort (A20c-3)
+    ssh "$SERVER" "umask 007; cat > '$REMOTE_DIR/$f.upload' && mv '$REMOTE_DIR/$f.upload' '$REMOTE_DIR/$f' && if id ghost >/dev/null 2>&1; then chown ghost:ghost '$REMOTE_DIR/$f'; fi" < "$f"
     echo "   kopiert: $f"
   done
   cat <<'EOF'
@@ -69,5 +83,5 @@ EOF
 fi
 
 echo
-echo "Weiter auf dem Server:  ssh $SERVER 'bash $REMOTE_DIR/deploy/hetzner/setup.sh'"
+echo "Weiter auf dem Server:  ssh $SERVER 'bash /root/ghost-deploy/setup.sh'"
 echo "(Projekt: $ROOT)"

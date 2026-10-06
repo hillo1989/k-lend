@@ -12,13 +12,18 @@ import {
   buildBody,
   callWalletApi,
   canSendSigned,
-  foreignOutputs,
   keepSigned,
+  outputKind,
+  outputWhat,
+  payeeOutputs,
+  planMismatch,
   planProblem,
+  planRecipient,
   reportLines,
   sendOutcome,
   signInWallet,
   submitBody,
+  unclearLocked,
   unclearSend,
   type BuildResult,
   type Fetch,
@@ -27,6 +32,7 @@ import {
 } from "../wallet/actions";
 import { WALLET_NAMES } from "../wallet/providers";
 import { useWallet } from "../wallet/WalletContext";
+import { useStatus } from "../lib/StatusContext";
 import { networkProblem } from "../probe/probe";
 import { CopyButton } from "./CopyCode";
 import { Callout } from "./ui";
@@ -92,6 +98,8 @@ export function WalletSignFlow({
   summary,
   blocked,
   onDone,
+  vaultIdOf,
+  vaultName,
 }: {
   network: NetworkId;
   action: WalletActionName;
@@ -103,8 +111,15 @@ export function WalletSignFlow({
   blocked: boolean;
   /** nach dem Senden (Status neu laden) */
   onDone(sent: boolean): void;
+  /** Vault-Nummer der Zustandsdatei → Covenant-ID (Status); prüft den Vault im Plan (A20d-2) */
+  vaultIdOf?: (index: number) => string | undefined;
+  /** Anzeige-Name eines Vaults zur Covenant-ID („Vault 2 · 1a2b3c4d“) */
+  vaultName?: (covenantId: string) => string | null;
 }) {
   const w = useWallet();
+  const { updatedAt } = useStatus();
+  // Ausgang eines Sendens unklar: alles gesperrt bis zum nächsten Status (A20d-1)
+  const [unclearAt, setUnclearAt] = useState<number | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [plan, setPlan] = useState<{ sig: string; at: number; b: BuildResult } | null>(null);
   const [checked, setChecked] = useState<{ signed: string; r: SubmitResult } | null>(null);
@@ -144,7 +159,7 @@ export function WalletSignFlow({
     setPhase("building");
     try {
       const b = (await callWalletApi(fetchFn, "build", buildBody(network, action, address, params))) as unknown as BuildResult;
-      const p = b.ok ? planProblem(b, network, address) : null;
+      const p = b.ok ? (planProblem(b, network, address) ?? planMismatch(b, action, params, address, vaultIdOf)) : null;
       setPlan({ sig, at: Date.now(), b: p ? { ok: false, error: p } : b });
     } catch (e) {
       setErr((e as Error).message);
@@ -178,6 +193,7 @@ export function WalletSignFlow({
       setSent(r);
       // „gleich erneut“ (Sperre belegt, A19-7): nichts gesendet, Signatur behalten
       if (!keepSigned(r)) setChecked(null);
+      if (sendOutcome(r) === "unclear") setUnclearAt(Date.now());
       if (r.ok && r.sent) {
         setPlan(null);
         logTx({ at: Date.now(), network, key: `wallet:${address}`, action, label, amount: null, unit: null, to: typeof params?.to === "string" ? params.to : null, txids: r.txid ? [r.txid] : [] });
@@ -187,6 +203,7 @@ export function WalletSignFlow({
       // beim Senden heißt jeder Fehler „unklar“, nie „nicht gesendet“ (A17-7)
       setSent({ ok: false, unclear: true, error: `${unclearSend()} (${(e as Error).message})` });
       setChecked(null);
+      setUnclearAt(Date.now());
       onDone(true);
     } finally {
       release();
@@ -195,9 +212,12 @@ export function WalletSignFlow({
   };
 
   const b = planFresh ? plan!.b : null;
-  const others = b && b.ok ? foreignOutputs(b, address) : [];
-  // Zahlungen an andere Adressen (Senden, Tresor-Empfänger …) bleiben sichtbar
-  const payees = others.filter((o) => o.what === "andere Adresse");
+  // Zahlungen an andere Adressen (Senden, Tresor-Empfänger …) bleiben sichtbar;
+  // ausgewählt nach Art, nicht nach dem deutschen Text (A20d-9)
+  const payees = b && b.ok ? payeeOutputs(b, address) : [];
+  const recipient = b && b.ok ? planRecipient(b) : null;
+  const planVault = b && b.ok && typeof params?.vault === "string" ? (vaultName?.(params.vault) ?? null) : null;
+  const isLocked = blocked || unclearLocked(unclearAt, updatedAt);
   return (
     <div className="wallet-flow">
       <p className="small muted">
@@ -205,12 +225,20 @@ export function WalletSignFlow({
       </p>
       {walletProblem && <Callout kind="warn">{walletProblem}</Callout>}
       {problem && <p className="muted small">{problem}</p>}
+      {unclearLocked(unclearAt, updatedAt) && (
+        <Callout kind="warn">
+          {tr(
+            "Prüfen, Signieren und Senden sind gesperrt, bis der Status neu geladen ist. Prüfe danach Guthaben und Verlauf, bevor du erneut sendest.",
+            "Checking, signing and sending are blocked until the status has reloaded. Then check balances and history before sending again.",
+          )}
+        </Callout>
+      )}
 
       <div className="btn-row">
-        <button type="button" className="btn btn-ghost" disabled={!params || !!walletProblem || blocked || phase !== "idle"} aria-busy={phase === "building"} onClick={() => void getPlan()}>
+        <button type="button" className="btn btn-ghost" disabled={!params || !!walletProblem || isLocked || phase !== "idle"} aria-busy={phase === "building"} onClick={() => void getPlan()}>
           {phase === "building" ? tr("Baue …", "Building …") : tr("1. Prüfen (Plan holen)", "1. Check (get plan)")}
         </button>
-        <button type="button" className="btn btn-ghost" disabled={!planOk || !!walletProblem || blocked || phase !== "idle"} aria-busy={phase === "signing"} onClick={() => void signAndCheck()}>
+        <button type="button" className="btn btn-ghost" disabled={!planOk || !!walletProblem || isLocked || phase !== "idle"} aria-busy={phase === "signing"} onClick={() => void signAndCheck()}>
           {phase === "signing" ? tr("Warte auf die Wallet …", "Waiting for the wallet …") : tr(`2. In ${WALLET_NAMES[w.kind]} signieren`, `2. Sign in ${WALLET_NAMES[w.kind]}`)}
         </button>
       </div>
@@ -228,6 +256,22 @@ export function WalletSignFlow({
           <p className="small">
             <strong>{summary}</strong> · {tr("Gebühr", "Fee")} {de((b.feeSompi ?? 0) / 1e8, 8)} KAS · {b.signInputs?.length ?? 0} {tr("Eingänge signiert die Wallet", "inputs signed by the wallet")}
           </p>
+          {(recipient || planVault) && (
+            <p className="small">
+              {recipient && (
+                <>
+                  {tr("Empfänger laut Plan", "Recipient according to the plan")}: <code className="addr-break">{recipient}</code>{" "}
+                  <span className="tag">{tr("stimmt mit deiner Eingabe überein", "matches your input")}</span>
+                </>
+              )}
+              {recipient && planVault && <br />}
+              {planVault && (
+                <>
+                  {tr("Vault laut Plan", "Vault according to the plan")}: <strong>{planVault}</strong>
+                </>
+              )}
+            </p>
+          )}
           <p className="small">{tr("Prüfe in der Wallet: Beträge und Empfänger müssen mit dieser Liste übereinstimmen.", "Check in the wallet: amounts and recipients must match this list.")}</p>
           {/* Ausgänge eingeklappt (Wunsch des Betreibers: kurz halten); Zahlungen an fremde Adressen stehen immer offen da */}
           {payees.length > 0 && (
@@ -244,8 +288,8 @@ export function WalletSignFlow({
             <ul className="tx-list">
               {(b.outputs ?? []).map((o) => (
                 <li key={o.index}>
-                  {tr("Ausgang", "Output")} {o.index}: {de(o.kas, 8)} KAS · {o.what}
-                  {o.what === "andere Adresse" ? ` → ${o.address}` : ""}
+                  {tr("Ausgang", "Output")} {o.index}: {de(o.kas, 8)} KAS · {outputWhat(o.what)}
+                  {outputKind(o, address) === "other" ? ` → ${o.address}` : ""}
                 </li>
               ))}
             </ul>
@@ -263,7 +307,7 @@ export function WalletSignFlow({
         </div>
       )}
 
-      <button type="button" className="btn btn-primary" disabled={!canSendSigned(checked?.r ?? null) || !planFresh || blocked || phase !== "idle"} aria-busy={phase === "sending"} onClick={() => void sendNow()}>
+      <button type="button" className="btn btn-primary" disabled={!canSendSigned(checked?.r ?? null) || !planFresh || isLocked || phase !== "idle"} aria-busy={phase === "sending"} onClick={() => void sendNow()}>
         {phase === "sending" ? tr("Sende … (bis zu 3 Minuten)", "Sending … (up to 3 minutes)") : isMain ? tr("3. Im Mainnet senden", "3. Send on mainnet") : tr("3. Senden", "3. Send")}
       </button>
 

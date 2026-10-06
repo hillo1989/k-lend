@@ -1,0 +1,3 @@
+# K.Lend: die Seite darf erfasst werden, die API nicht (Live-Daten, Wallet-Routen)
+User-agent: *
+Disallow: /api/

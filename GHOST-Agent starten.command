@@ -14,9 +14,11 @@
 #  - Zins (nur mit Komitee-Datei): je Runde eine Messung des GHOST-Kurses im
 #    frisch abgeglichenen Pool; entschieden wird nach dem Median der Messungen
 #    der letzten Stunde, frühestens ab 6 Messungen und nur, wenn der Pool
-#    mindestens 10 GHOST hält. Liegt der Median unter 0,995 USD, steigt der Zins
-#    um 0,5 Prozentpunkte (Schulden werden teurer, GHOST werden zurückgekauft und
-#    getilgt); über 1,005 USD sinkt er um 0,5 Punkte. Rahmen 0–20 % p. a.,
+#    mindestens 10 GHOST hält und in der Stunde gehandelt wurde (Tausch-
+#    verhältnis zusammen ≥ 2 % bewegt). Liegt der Median unter 0,97 USD, steigt
+#    der Zins um 0,5 Prozentpunkte (Schulden werden teurer, GHOST werden
+#    zurückgekauft und getilgt); über 1,03 USD sinkt er um 0,5 Punkte, nie unter
+#    den Grundzins 2 %. Dazwischen (Kursband ±3 %) bleibt er. Rahmen 2–20 % p. a.,
 #    höchstens einmal pro Stunde – auch über Neustarts hinweg (Messungen und
 #    letzte Änderung in deployments/<netz>-zins.json).
 #  - Liquidationen: Vaults unter 150 % werden abgelöst, aber nur, wenn auch der

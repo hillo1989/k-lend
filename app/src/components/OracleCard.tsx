@@ -1,4 +1,4 @@
-import { ORACLE_STALE_MINUTES, STABLE_SYMBOL } from "../config";
+import { ORACLE_FREEZE_AFTER_HOURS, oracleStaleMinutes, STABLE_SYMBOL } from "../config";
 import { useStatus } from "../lib/StatusContext";
 import { de, oracleStale, shortHex } from "../lib/status";
 import { href } from "../router";
@@ -13,7 +13,9 @@ const age = (min: number) => (min < 90 ? `${de(min, 0)} min` : `${de(min / 60, 1
 export function OracleCard({ compact = false }: { compact?: boolean }) {
   const { status } = useStatus();
   const live = status?.deployed ? status : null;
-  const stale = live ? oracleStale(live.oracle) : false;
+  const stale = live ? oracleStale(live.oracle, live.signers?.freezeAfterHours) : false;
+  const staleMin = oracleStaleMinutes(live?.signers?.freezeAfterHours);
+  const freezeH = live?.signers?.freezeAfterHours ?? ORACLE_FREEZE_AFTER_HOURS;
   const frozen = !!live?.oracle.frozen;
   const sg = live?.signers;
   const rot = sg?.rotation?.valid ? sg.rotation : null;
@@ -158,7 +160,12 @@ export function OracleCard({ compact = false }: { compact?: boolean }) {
           <a href={href("orakel")}>{tr("Alles zum Orakel →", "All about the oracle →")}</a>
         </p>
       ) : (
-        <p className="small muted">{tr(`Als veraltet gilt ein Preis ab ${de(ORACLE_STALE_MINUTES / 60, 1)} h.`, `A price counts as stale after ${de(ORACLE_STALE_MINUTES / 60, 1)} h.`)}</p>
+        <p className="small muted">
+          {tr(
+            `Als veraltet gilt ein Preis ab ${de(staleMin, 0)} Minuten; nach ${de(freezeH, 1)} h ohne Preis darf jeder das Orakel einfrieren.`,
+            `A price counts as stale after ${de(staleMin, 0)} minutes; after ${de(freezeH, 1)} h without a price anyone may freeze the oracle.`,
+          )}
+        </p>
       )}
     </section>
   );

@@ -13,6 +13,40 @@ export const STABLE_SYMBOL = "GHOST";
 export const stableTagline = () => tr(`${STABLE_SYMBOL} – der überbesicherte Dollar auf Kaspa L1`, `${STABLE_SYMBOL} – the overcollateralized dollar on Kaspa L1`);
 export const NATIVE = "KAS";
 
+/**
+ * Höchstzahl der Unterzeichner im Register (contracts/signer_register_v4.sil
+ * und protocol/src/contracts.rs MAX_SIGNERS = 7; mit 9 lag das Register bei
+ * 28 Sigops). Audit 20 A20d-4.
+ */
+export const MAX_SIGNERS = 7;
+
+/**
+ * Automatische Zinsregel des GHOST-Agenten, wie sie die Texte beschreiben
+ * (HowItWorks, FAQ, Vault-Hilfe, Landing, Vorprüfung).
+ * Abgeglichen mit protocol/src/math.rs (RATE_ZONE 0,03, RATE_MIN_PCT 2,
+ * RATE_MAX_PCT 20, RATE_STEP_PCT 0,5) und rate.rs (MIN_SAMPLES 6,
+ * MIN_POOL_GHOST 10, MIN_TRADE_MOVE 2 % Bewegung des Tauschverhältnisses je Stunde).
+ */
+export const RATE_RULE = {
+  /** darunter (USD je GHOST, Median der Stunde) steigt der Zins */
+  lowUsd: 0.97,
+  /** darüber sinkt er */
+  highUsd: 1.03,
+  /** Schritt je Stunde in Prozentpunkten (vom Vertrag begrenzt) */
+  stepPp: 0.5,
+  /** Grundzins = Untergrenze der Regel (% p. a.) */
+  basePct: 2,
+  /** Obergrenze des Vertrags (% p. a.) */
+  maxPct: 20,
+  /** so viele Messungen der Stunde mindestens */
+  minSamples: 6,
+  /** so viele GHOST muss der Pool mindestens halten */
+  minPoolGhost: 10,
+} as const;
+
+/** Zahl für die Zinsregel-Texte: deutsch mit Komma, englisch mit Punkt */
+export const ruleNum = (x: number, lang: "de" | "en") => (lang === "de" ? String(x).replace(".", ",") : String(x));
+
 
 /**
  * Vertragsparameter, wie sie in den lokalen Tests verwendet werden
@@ -79,11 +113,25 @@ export const NETWORKS: Record<NetworkId, { label: string; short: string; ownerKe
 export const DEFAULT_NETWORK: NetworkId = "mainnet";
 
 /**
- * Ab diesem Alter gilt der Orakelpreis als veraltet (Anzeige-Warnung).
- * Der Dauerbetrieb (GHOST-Agent starten.command) aktualisiert spätestens nach
- * 6 h, auch ohne Preisänderung. Deshalb liegt die Grenze bei 6,5 h und nicht bei 60 min.
+ * Version 4: Kommt so lange kein Preis, darf jeder das Orakel einfrieren
+ * (Prägen, Einlösen, Liquidieren und Tausch gesperrt). Live-Wert:
+ * status.signers.freezeAfterHours; dies ist nur der Ersatz ohne Live-Daten.
  */
-export const ORACLE_STALE_MINUTES = 390;
+export const ORACLE_FREEZE_AFTER_HOURS = 2;
+
+/**
+ * Ab diesem Alter gilt der Orakelpreis als veraltet (Anzeige-Warnung), bei
+ * 2 h Einfrier-Frist 75 min. Der Agent aktualisiert spätestens nach der
+ * halben Frist (60 min, ghostctl `heartbeat_min`), auch ohne Preisänderung;
+ * „veraltet“ heißt also: das Herzschlag-Update ist eine Viertelstunde
+ * überfällig, und das Einfrieren rückt näher (Audit 20 A20d-3; die frühere
+ * Grenze 390 min stammte aus Version 3 ohne Einfrieren).
+ */
+export function oracleStaleMinutes(freezeAfterHours: number = ORACLE_FREEZE_AFTER_HOURS): number {
+  const f = Number.isFinite(freezeAfterHours) && freezeAfterHours > 0 ? freezeAfterHours * 60 : ORACLE_FREEZE_AFTER_HOURS * 60;
+  return Math.round(Math.min(f / 2 + 15, f - 15));
+}
+export const ORACLE_STALE_MINUTES = oracleStaleMinutes();
 
 export const WALLET_LINKS = {
   kasware: "https://kasware.xyz/",

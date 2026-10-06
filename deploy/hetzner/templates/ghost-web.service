@@ -5,6 +5,13 @@
 # die Besucher in ihrer Browser-Wallet signiert haben (/api/wallet/submit);
 # dafür nimmt ghostctl kurz die Sperre der Zustandsdatei und schreibt das
 # Journal in deployments/.
+#
+# Rechtemodell (Audit 20 A20c-3, README „Benutzer und Rechte“): Die Seite läuft
+# als eigener Benutzer ghost-web, NICHT als ghost (Agent, Schlüssel). Sie ist
+# über die Zusatzgruppe ghost Mitglied der Betriebsgruppe und darf deshalb nur
+# deployments/ beschreiben (2770 ghost:ghost, Dateien 660). keys/ (700 ghost)
+# kann sie weder öffnen noch sehen, den Agenten-Prozess weder sehen
+# (ProtectProc=invisible) noch mit Signalen erreichen (anderer Benutzer).
 [Unit]
 Description=GHOST K.Lend Seite (öffentlicher Modus)
 Wants=network-online.target
@@ -12,8 +19,9 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=ghost
-Group=ghost
+User=ghost-web
+Group=ghost-web
+SupplementaryGroups=ghost
 WorkingDirectory=@GHOST_DIR@/app
 Environment=NODE_ENV=production
 Environment=GHOST_PUBLIC=1
@@ -30,11 +38,14 @@ MemoryMax=600M
 
 # Härtung: Die Seite sieht keys/ überhaupt nicht; schreiben nur in deployments/
 # (ghostctl status und wallet submit --send nehmen dort die Sperre, gleichen
-# die Zustandsdatei ab und führen das Journal)
+# die Zustandsdatei ab und führen das Journal). Neue Dateien 660, damit der
+# Agent sie lesen und fortschreiben kann (Gruppe ghost über das setgid-Bit).
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=@GHOST_DIR@/deployments
 InaccessiblePaths=-@GHOST_DIR@/keys
+# Was in deployments/ oder /tmp liegt, ist nie ausführbar
+NoExecPaths=@GHOST_DIR@/deployments /tmp /var/tmp /dev/shm
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
@@ -44,14 +55,23 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
+# fremde Prozesse (Agent) in /proc unsichtbar (Audit 20 A20c-3)
+ProtectProc=invisible
+# AF_UNIX bleibt: Node verbindet ghostctl über socketpair (stdout/stderr)
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
+RemoveIPC=true
+KeyringMode=private
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @obsolete
+SystemCallErrorNumber=EPERM
 CapabilityBoundingSet=
-UMask=0077
+AmbientCapabilities=
+UMask=0007
 
 [Install]
 WantedBy=multi-user.target

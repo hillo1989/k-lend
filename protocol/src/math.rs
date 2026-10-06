@@ -137,6 +137,11 @@ pub fn sweepable(coll: i64, s: &VaultState, price: i64, index: i64) -> bool {
 
 /// Mindestgewinn des Keepers zum Marktpreis in bps (Audit 10, A10-A-2)
 pub const KEEPER_MARGIN_BPS: i64 = 200;
+/// Netzgebühr einer Liquidation des Keepers in sompi, wie sie in die
+/// Gewinnprüfung eingeht (Audit 20 A20e-3: vorher fehlte sie, Mini-Vaults mit
+/// weniger als ≈ 0,027 GHOST Burn waren ein Verlust). Gemessen 0,0647 KAS je
+/// Liquidation; 0,1 KAS deckt auch ein vorheriges Zusammenführen der GHOST.
+pub const KEEPER_FEE_SOMPI: i64 = 10_000_000;
 
 /// Nimmt stable_vault.sil liquidate() `burn` an? Rückgabe: (sompi an den
 /// Liquidator, Zustand danach – None, wenn der Vault endet). Spiegelt die drei
@@ -159,10 +164,15 @@ pub fn liquidation(coll: i64, s: &VaultState, burn: i64, price: i64, index: i64,
 
 /// Lohnt sich die Liquidation zum Marktpreis? Der Vertrag rechnet mit dem
 /// Orakelpreis; liegt der Markt darunter, kann der Keeper sonst verlieren.
+/// Die Netzgebühr (KEEPER_FEE_SOMPI, zum Marktpreis) geht vom Erlös ab
+/// (Audit 20 A20e-3).
 #[allow(clippy::too_many_arguments)]
 pub fn keeper_profitable(coll: i64, s: &VaultState, burn: i64, oracle_price: i64, market_price: i64, index: i64, liq_bps: i64, bonus_bps: i64) -> bool {
     match liquidation(coll, s, burn, oracle_price, index, liq_bps, bonus_bps) {
-        Some((got, _)) => value_of(got, market_price) as i128 * 10_000 >= burn as i128 * (10_000 + KEEPER_MARGIN_BPS) as i128,
+        Some((got, _)) => {
+            let net = value_of(got, market_price) as i128 - value_of(KEEPER_FEE_SOMPI, market_price) as i128;
+            net * 10_000 >= burn as i128 * (10_000 + KEEPER_MARGIN_BPS) as i128
+        }
         None => false,
     }
 }
@@ -185,9 +195,12 @@ pub fn keeper_burn(coll: i64, s: &VaultState, oracle_price: i64, market_price: i
     (burn > 0 && keeper_profitable(coll, s, burn, oracle_price, market_price, index, liq_bps, bonus_bps)).then_some(burn)
 }
 
-/// Zinsregel des Agenten (Version 3), in % p. a.: Liegt GHOST unter 0,995 USD,
-/// steigt der Zins um RATE_STEP_PCT (Schulden werden teurer, Schuldner kaufen
-/// GHOST und tilgen), über 1,005 USD sinkt er (Prägen lohnt sich wieder).
+/// Zinsregel des Agenten, in % p. a. (Entscheidung des Betreibers 06.10.2026,
+/// „Totzone + nur bei Handel“, Audit 20 A20e-6): Liegt der GHOST-Median unter
+/// 1 − RATE_ZONE (0,97 USD), steigt der Zins um RATE_STEP_PCT (Schulden werden
+/// teurer, Schuldner kaufen GHOST und tilgen), über 1 + RATE_ZONE (1,03 USD)
+/// sinkt er (Prägen lohnt sich wieder). Dazwischen (Totzone = Kursband des
+/// Pools) bleibt er. Ob im Fenster gehandelt wurde, prüft `rate::RateLog`.
 /// Grenzen RATE_MIN_PCT … RATE_MAX_PCT. None = unverändert lassen.
 pub const RATE_STEP_PCT: f64 = 0.5;
 pub const RATE_MAX_PCT: f64 = 20.0;
@@ -195,6 +208,12 @@ pub const RATE_MAX_PCT: f64 = 20.0;
 /// darunter. Liegt der Zins darunter (Start mit 0 %), hebt `rate_floor_step`
 /// ihn in Vertragsschritten (0,5 Punkte, höchstens einmal je Stunde) an.
 pub const RATE_MIN_PCT: f64 = 2.0;
+/// Totzone der Zinsregel: ±3 % um 1 USD, genau das Kursband des Pools
+/// (pool::POOL_BAND_BPS = 300). Vorher ±0,5 %: In einem Pool ohne Arbitrage
+/// bildet die Messung nur die KAS-Bewegung ab und verließ ±0,5 % in Stunden;
+/// mit dem Grundzins als Untergrenze trieb das den Zins einseitig nach oben
+/// (Audit 20 A20e-6, Simulation Ø ≈ 11 % nach 30 Tagen).
+pub const RATE_ZONE: f64 = 0.03;
 
 /// Nächster Schritt zum Grundzins, wenn der Zins darunter liegt (unabhängig vom
 /// GHOST-Kurs und von der Pool-Liquidität). None = Grundzins erreicht.
@@ -214,9 +233,9 @@ pub fn rate_next(current_pct: f64, ghost_usd: f64) -> Option<f64> {
     // (von Hand gesetzt) ergab sonst Schritte wie +0,27 oder senkte bei „rauf“
     // (Audit 11 A11-O-10)
     let cur = ((current_pct.clamp(0.0, RATE_MAX_PCT)) / RATE_STEP_PCT).round() * RATE_STEP_PCT;
-    let next = if ghost_usd < 0.995 {
+    let next = if ghost_usd < 1.0 - RATE_ZONE {
         (cur + RATE_STEP_PCT).min(RATE_MAX_PCT)
-    } else if ghost_usd > 1.005 {
+    } else if ghost_usd > 1.0 + RATE_ZONE {
         // nie unter den Grundzins; liegt er schon darunter, hebt rate_floor_step an
         if cur <= RATE_MIN_PCT + 1e-9 {
             return None;
@@ -280,6 +299,35 @@ mod keeper_tests {
         assert!(keeper_burn(coll, &s, 2_000_000, 1_950_000, I0, 15_000, 1_000).is_some());
     }
 
+    /// Audit 20 A20e-3: Mini-Vault aus dem Bericht (Burn 0,01 GHOST, Erlös
+    /// 0,3903 KAS ≈ 0,011 USD) – mit der Netzgebühr ein Verlust, also kein
+    /// Liquidieren; ein normaler Vault bleibt profitabel
+    #[test]
+    fn a20e_3_keeper_rechnet_die_netzgebuehr_ein() {
+        let e8 = 100_000_000i64;
+        let price = 2_818_000; // 0,02818 USD je KAS: 0,3903 KAS ≈ 0,011 USD
+        // Vault unter der Schwelle: 0,5 KAS Sicherheit (≈ 141 %), 0,01 GHOST Schuld
+        let coll = 50_000_000;
+        let s = debt(e8 / 100);
+        let burn = keeper_burn(coll, &s, price, price, I0, 15_000, 1_000);
+        if let Some(b) = burn {
+            let (got, _) = liquidation(coll, &s, b, price, I0, 15_000, 1_000).unwrap();
+            let profit = value_of(got, price) - value_of(KEEPER_FEE_SOMPI, price) - b;
+            assert!(profit * 10_000 >= b * KEEPER_MARGIN_BPS, "Verlust trotz Gebühr: Burn {b}, Erlös {got}");
+        }
+        // genau der Fall aus dem Bericht: Burn 0,01 GHOST, Erlös 0,3903 KAS – ohne Gebühr „profitabel“
+        let (got, _) = liquidation(coll, &s, e8 / 100, price, I0, 15_000, 1_000).expect("Vertrag nimmt an");
+        assert!(value_of(got, price) as i128 * 10_000 >= (e8 / 100) as i128 * 10_200, "ohne Gebühr galt das als Gewinn");
+        assert!(!keeper_profitable(coll, &s, e8 / 100, price, price, I0, 15_000, 1_000), "mit Gebühr nicht mehr");
+        assert_eq!(keeper_burn(coll, &s, price, price, I0, 15_000, 1_000), None);
+        // ab etwa 0,05 GHOST Burn lohnt es sich wieder
+        let coll = 248_000_000;
+        let s = debt(5 * e8 / 100);
+        let b = keeper_burn(coll, &s, price, price, I0, 15_000, 1_000).expect("lohnt sich");
+        let (got, _) = liquidation(coll, &s, b, price, I0, 15_000, 1_000).unwrap();
+        assert!((value_of(got, price) - value_of(KEEPER_FEE_SOMPI, price) - b) * 10_000 >= b * KEEPER_MARGIN_BPS);
+    }
+
     /// Obergrenze: ohne Grenze unbegrenzt, sonst max_debt − debt
     #[test]
     fn cap_room_je_vault() {
@@ -306,18 +354,22 @@ mod keeper_tests {
         assert_eq!(max_mint(1_000 * E8, &debt(10 * E8), 5_000_000, I0, 20_000), 15 * E8);
     }
 
-    /// Zinsregel: unter 0,995 rauf, über 1,005 runter, dazwischen nichts; Grenzen
+    /// Zinsregel: unter 0,97 rauf, über 1,03 runter, dazwischen nichts
+    /// (Totzone = Kursband des Pools, A20e-6); Grenzen
     #[test]
     fn zinsregel_folgt_dem_ghost_kurs() {
-        assert_eq!(rate_next(0.0, 0.97), Some(0.5));
-        assert_eq!(rate_next(3.0, 0.99), Some(3.5));
+        assert_eq!(rate_next(0.0, 0.96), Some(0.5));
+        assert_eq!(rate_next(3.0, 0.9699), Some(3.5));
+        assert_eq!(rate_next(3.0, 0.97), None, "Rand der Totzone");
+        assert_eq!(rate_next(3.0, 0.99), None, "vorher +0,5: jetzt Totzone");
         assert_eq!(rate_next(3.0, 1.0), None);
-        assert_eq!(rate_next(3.0, 1.004), None);
-        assert_eq!(rate_next(3.0, 1.02), Some(2.5));
-        assert_eq!(rate_next(0.0, 1.02), None, "nicht unter 0");
-        assert_eq!(rate_next(2.5, 1.02), Some(2.0));
-        assert_eq!(rate_next(2.0, 1.02), None, "nicht unter den Grundzins");
-        assert_eq!(rate_next(1.0, 1.02), None, "unter dem Grundzins nicht weiter runter");
+        assert_eq!(rate_next(3.0, 1.02), None, "vorher −0,5: jetzt Totzone");
+        assert_eq!(rate_next(3.0, 1.03), None, "Rand der Totzone");
+        assert_eq!(rate_next(3.0, 1.0301), Some(2.5));
+        assert_eq!(rate_next(0.0, 1.05), None, "nicht unter 0");
+        assert_eq!(rate_next(2.5, 1.05), Some(2.0));
+        assert_eq!(rate_next(2.0, 1.05), None, "nicht unter den Grundzins");
+        assert_eq!(rate_next(1.0, 1.05), None, "unter dem Grundzins nicht weiter runter");
         assert_eq!(rate_floor_step(0.0), Some(0.5));
         assert_eq!(rate_floor_step(1.5), Some(2.0));
         assert_eq!(rate_floor_step(1.8), Some(2.0));
@@ -330,6 +382,12 @@ mod keeper_tests {
         assert_eq!(rate_next(3.23, 0.9), Some(3.5));
         assert_eq!(rate_next(31.5, 0.9), Some(20.0), "rauf senkt nicht");
         assert_eq!(rate_next(31.5, 1.1), Some(19.5));
+    }
+
+    /// Totzone = Kursband des Pools (A20e-6, Entscheidung des Betreibers)
+    #[test]
+    fn totzone_ist_das_kursband_des_pools() {
+        assert_eq!((RATE_ZONE * 10_000.0).round() as i64, crate::pool::POOL_BAND_BPS);
     }
 
     /// Rücknahme: 1 USD je GHOST minus 1 %, nur ab der Liquidationsschwelle

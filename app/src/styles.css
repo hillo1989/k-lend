@@ -1623,6 +1623,13 @@ fieldset.plain:disabled {
   padding-left: 1.1em;
   font-size: 0.9rem;
 }
+/* lange Adressen (69 Zeichen ohne Umbruchstelle) brechen auf dem Handy um,
+   statt die Box zu sprengen – sie sind vor dem Signieren zu vergleichen (A20d-11) */
+.tx-list li {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+}
 .txid {
   display: flex;
   gap: 8px;

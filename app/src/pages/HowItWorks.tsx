@@ -1,5 +1,5 @@
 import type { MouseEvent } from "react";
-import { NATIVE, PARAMS, STABLE_SYMBOL } from "../config";
+import { MAX_SIGNERS, NATIVE, PARAMS, RATE_RULE as R, ruleNum, STABLE_SYMBOL } from "../config";
 import { ProtocolDiagram } from "../components/Diagram";
 import { fmtBps, fmtKas, fmtStable, fmtUsdPrice, formatUnits } from "../lib/format";
 import { INDEX_SCALE, UNIT, collateralValue, minHealthyPrice, ratioBps, simLiquidate, type VaultState } from "../lib/vaultMath";
@@ -126,8 +126,8 @@ export function HowItWorks() {
           <li>
             <strong>{tr("Der Satz passt sich selbst an:", "The rate adjusts itself:")}</strong>{" "}
             {tr(
-              `Der GHOST-Agent misst in jeder Runde, was ${STABLE_SYMBOL} am Markt kostet (Kurs im Tauschpool mal ${NATIVE}-Preis), und entscheidet nach dem Median der Messungen der letzten Stunde. Liegt er unter 0,995 USD, steigt der Zins um 0,5 Prozentpunkte: Schulden werden teurer, Schuldner kaufen ${STABLE_SYMBOL} und tilgen, das hebt den Kurs. Liegt er über 1,005 USD, sinkt der Zins um 0,5 Prozentpunkte: Prägen lohnt sich, mehr ${STABLE_SYMBOL} kommen in Umlauf. Der Satz ändert sich höchstens einmal pro Stunde, auch wenn der Agent neu startet, und bleibt zwischen 2 % (Grundzins) und 20 % pro Jahr. Liegt er unter 2 %, hebt der Agent ihn stündlich um 0,5 Punkte bis auf 2 % an. Nach unten ändert er sich nur, wenn mindestens 6 Messungen vorliegen und der Pool mindestens 10 ${STABLE_SYMBOL} hält; ein einzelner Tausch bewegt ihn also nicht.`,
-              `In every round the GHOST agent measures what ${STABLE_SYMBOL} costs on the market (pool price times the ${NATIVE} price) and decides by the median of the last hour's measurements. If it is below 0.995 USD, the rate rises by 0.5 percentage points: debt gets more expensive, debtors buy ${STABLE_SYMBOL} and repay, which lifts the price. If it is above 1.005 USD, the rate falls by 0.5 percentage points: minting pays off and more ${STABLE_SYMBOL} enter circulation. The rate changes at most once per hour, even across agent restarts, and stays between 2 % (base rate) and 20 % per year. If it is below 2 %, the agent raises it by 0.5 points per hour up to 2 %. Downward it only changes when there are at least 6 measurements and the pool holds at least 10 ${STABLE_SYMBOL}, so a single swap does not move it.`,
+              `Der GHOST-Agent misst in jeder Runde, was ${STABLE_SYMBOL} am Markt kostet (Kurs im Tauschpool mal ${NATIVE}-Preis), und entscheidet nach dem Median der Messungen der letzten Stunde. Liegt er unter ${ruleNum(R.lowUsd, "de")} USD, steigt der Zins um ${ruleNum(R.stepPp, "de")} Prozentpunkte: Schulden werden teurer, Schuldner kaufen ${STABLE_SYMBOL} und tilgen, das hebt den Kurs. Liegt er über ${ruleNum(R.highUsd, "de")} USD, sinkt der Zins um ${ruleNum(R.stepPp, "de")} Prozentpunkte: Prägen lohnt sich, mehr ${STABLE_SYMBOL} kommen in Umlauf. Dazwischen (Totzone ±3 % um 1 USD) bleibt er stehen. Geändert wird nur, wenn im Pool in dieser Stunde tatsächlich getauscht wurde – ohne Handel ist der Poolkurs kein Marktpreis –, wenn mindestens ${R.minSamples} Messungen vorliegen und der Pool mindestens ${R.minPoolGhost} ${STABLE_SYMBOL} hält. Der Satz ändert sich höchstens einmal pro Stunde, auch wenn der Agent neu startet, und bleibt zwischen ${R.basePct} % (Grundzins, Untergrenze) und ${R.maxPct} % pro Jahr. Liegt er unter ${R.basePct} %, hebt der Agent ihn stündlich um ${ruleNum(R.stepPp, "de")} Punkte bis auf ${R.basePct} % an.`,
+              `In every round the GHOST agent measures what ${STABLE_SYMBOL} costs on the market (pool price times the ${NATIVE} price) and decides by the median of the last hour's measurements. If it is below ${ruleNum(R.lowUsd, "en")} USD, the rate rises by ${ruleNum(R.stepPp, "en")} percentage points: debt gets more expensive, debtors buy ${STABLE_SYMBOL} and repay, which lifts the price. If it is above ${ruleNum(R.highUsd, "en")} USD, the rate falls by ${ruleNum(R.stepPp, "en")} percentage points: minting pays off and more ${STABLE_SYMBOL} enter circulation. In between (dead zone ±3 % around 1 USD) it stays put. It only changes if the pool was actually traded in that hour – without trading the pool price is not a market price –, if there are at least ${R.minSamples} measurements and the pool holds at least ${R.minPoolGhost} ${STABLE_SYMBOL}. The rate changes at most once per hour, even across agent restarts, and stays between ${R.basePct} % (base rate, floor) and ${R.maxPct} % per year. If it is below ${R.basePct} %, the agent raises it by ${ruleNum(R.stepPp, "en")} points per hour up to ${R.basePct} %.`,
             )}
           </li>
           <li>
@@ -140,8 +140,8 @@ export function HowItWorks() {
           <li>
             <strong>{tr("Bezahlt wird beim Schließen:", "You pay when closing:")}</strong>{" "}
             {tr(
-              `Tilgen verbrennt ${STABLE_SYMBOL} und senkt nur die Schuld; der Zins bleibt stehen. Schließt du den schuldenfreien Vault, geht der Zins in ${NATIVE} zum Orakelpreis an die Zinsadresse, der Rest an dich. Unter 0,2 ${NATIVE} wird er erlassen. Zehrt der Zins die ganze Sicherheit auf (das kann nach einer Liquidation übrig bleiben), darf jeder den Vault auflösen: Die Sicherheit geht bis auf 0,01 ${NATIVE} an die Zinsadresse.`,
-              `Repaying burns ${STABLE_SYMBOL} and only lowers the debt; the interest stays. When you close the debt-free vault, the interest goes to the interest address in ${NATIVE} at the oracle price, the rest to you. Below 0.2 ${NATIVE} it is waived. If the interest eats up all the collateral (this can remain after a liquidation), anyone may dissolve the vault: the collateral goes to the interest address except for 0.01 ${NATIVE}.`,
+              `Tilgen verbrennt ${STABLE_SYMBOL} und senkt nur die Schuld; der Zins bleibt stehen. Schließt du den schuldenfreien Vault, geht der Zins in ${NATIVE} zum Orakelpreis an die Zinsadresse, der Rest an dich. Unter 0,2 ${NATIVE} wird er erlassen. Zehrt der Zins die ganze Sicherheit auf (das kann nach einer Liquidation übrig bleiben), darf jeder den Vault auflösen: Die Sicherheit geht nach Abzug von 0,1 ${NATIVE} Netzgebühr an die Zinsadresse; die Gebühr trägt der Vault, wer auflöst, zahlt nichts.`,
+              `Repaying burns ${STABLE_SYMBOL} and only lowers the debt; the interest stays. When you close the debt-free vault, the interest goes to the interest address in ${NATIVE} at the oracle price, the rest to you. Below 0.2 ${NATIVE} it is waived. If the interest eats up all the collateral (this can remain after a liquidation), anyone may dissolve the vault: the collateral goes to the interest address minus 0.1 ${NATIVE} network fee; the vault bears the fee, whoever dissolves pays nothing.`,
             )}
           </li>
           <li>
@@ -273,8 +273,8 @@ export function HowItWorks() {
           {tr(`Die Kette kennt den Kurs von ${NATIVE} nicht. Der Vertrag nimmt einen neuen Preis nur an, wenn `, `The chain does not know the price of ${NATIVE}. The contract only accepts a new price if `)}
           <strong>{tr("eine echte Mehrheit der Unterzeichner", "a true majority of the signers")}</strong>
           {tr(
-            " ihn unterschrieben hat. Das prüft ein eigener Vertrag, das Unterzeichner-Register. Es speichert nur den Hash des Unterzeichner-Satzes: n Schlüssel (höchstens 9), Preis-Schwelle t mit 2t > n und eine Austausch-Schwelle.",
-            " have signed it. This is checked by a separate contract, the signer register. It only stores the hash of the signer set: n keys (at most 9), price threshold t with 2t > n, and a rotation threshold.",
+            ` ihn unterschrieben hat. Das prüft ein eigener Vertrag, das Unterzeichner-Register. Es speichert nur den Hash des Unterzeichner-Satzes: n Schlüssel (höchstens ${MAX_SIGNERS}), Preis-Schwelle t mit 2t > n und eine Austausch-Schwelle.`,
+            ` have signed it. This is checked by a separate contract, the signer register. It only stores the hash of the signer set: n keys (at most ${MAX_SIGNERS}), price threshold t with 2t > n, and a rotation threshold.`,
           )}
         </p>
         <div className="callout callout-warn">
@@ -357,8 +357,8 @@ export function HowItWorks() {
             {tr("Die Verträge sind neu und ", "The contracts are new and ")}
             <strong>{tr("nicht professionell geprüft", "not professionally audited")}</strong>{" "}
             {tr(
-              "(mehrere KI-Audits haben u. a. einen kritischen Fehler in Version 1 gefunden, behoben in Version 2 und 2.1 – siehe AUDIT.md). Getestet sind sie lokal (mit Mutationstest). Version 1 lief vollständig im Testnetz, Version 2.1 wird direkt im Mainnet mit Kleinstbeträgen erprobt. Fehler können zum Totalverlust führen.",
-              "(several AI audits found, among other things, a critical bug in version 1, fixed in version 2 and 2.1 – see AUDIT.md). They are tested locally (with mutation testing). Version 1 ran fully on testnet; version 2.1 is being tried directly on mainnet with tiny amounts. Bugs can lead to total loss.",
+              "(mehrere KI-Audits haben u. a. einen kritischen Fehler in Version 1 gefunden, behoben in Version 2 – siehe AUDIT.md). Getestet sind sie lokal (mit Mutationstest). Version 1 lief vollständig im Testnetz; im Mainnet läuft Version 4, mit kleinen Beträgen und einer Obergrenze von 50 GHOST je Vault. Fehler können zum Totalverlust führen.",
+              "(several AI audits found, among other things, a critical bug in version 1, fixed in version 2 – see AUDIT.md). They are tested locally (with mutation testing). Version 1 ran fully on testnet; version 4 runs on mainnet, with small amounts and a cap of 50 GHOST per vault. Bugs can lead to total loss.",
             )}
           </li>
           <li>

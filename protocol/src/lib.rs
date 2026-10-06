@@ -14,6 +14,7 @@ pub mod standing;
 pub mod store;
 pub mod tresor;
 pub mod txb;
+pub mod v5;
 pub mod wallet;
 pub mod wallet_ops;
 pub mod net;

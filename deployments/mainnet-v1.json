@@ -13,7 +13,7 @@
   },
   "oracle": {
     "outpoint": {
-      "transactionId": "368cc2d8791d1b9a8e21cd2005ffd78f77d074045df5aec20a3f6a67d8745151",
+      "transactionId": "b03d1be9bd25f5640ba49f9210476378338fe8ee7e3ecaed8e6e738220a71508",
       "index": 1
     },
     "value": 1000000000,
@@ -78,48 +78,6 @@
     "liq_bps": 15000,
     "bonus_bps": 1000
   },
-  "vaults": [
-    {
-      "owner": "ed2fa9eb8d521bd5d643d28afcd67e307bfc4bd4a39f29daf631e7d07bc3ab55",
-      "vault": {
-        "outpoint": {
-          "transactionId": "368cc2d8791d1b9a8e21cd2005ffd78f77d074045df5aec20a3f6a67d8745151",
-          "index": 0
-        },
-        "value": 15000000000,
-        "cov": "d7dba7c24b9c88ec3525022ef25d0a4221e2b85c65c67672af15b2444cb17c39",
-        "state": 100000000
-      },
-      "branch": {
-        "outpoint": {
-          "transactionId": "368cc2d8791d1b9a8e21cd2005ffd78f77d074045df5aec20a3f6a67d8745151",
-          "index": 2
-        },
-        "value": 300000000,
-        "cov": "3b5e236f623c642780936144f825733c86957079ac043129181a90f4267f11d6",
-        "state": {
-          "owner": "d7dba7c24b9c88ec3525022ef25d0a4221e2b85c65c67672af15b2444cb17c39",
-          "typ": 2,
-          "amount": 0,
-          "minter": true
-        }
-      }
-    }
-  ],
-  "tokens": [
-    {
-      "outpoint": {
-        "transactionId": "368cc2d8791d1b9a8e21cd2005ffd78f77d074045df5aec20a3f6a67d8745151",
-        "index": 3
-      },
-      "value": 100000000,
-      "cov": "3b5e236f623c642780936144f825733c86957079ac043129181a90f4267f11d6",
-      "state": {
-        "owner": "ed2fa9eb8d521bd5d643d28afcd67e307bfc4bd4a39f29daf631e7d07bc3ab55",
-        "typ": 0,
-        "amount": 100000000,
-        "minter": false
-      }
-    }
-  ]
+  "vaults": [],
+  "tokens": []
 }

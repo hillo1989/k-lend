@@ -181,7 +181,7 @@ export function WalletButton() {
                   </button>
                 ))}
               </div>
-              <p className="muted small">{tr("Die Wallet fragt nach einer Freigabe. Die Seite liest nur Adresse, Netz und Guthaben.", "The wallet asks for approval. The page only reads address, network and balance.")}</p>
+              <p className="muted small">{tr("Die Wallet fragt nach einer Freigabe. Die Seite liest Adresse, Netz, Guthaben und den öffentlichen Schlüssel; signiert wird nur, was du in der Wallet bestätigst.", "The wallet asks for approval. The page reads address, network, balance and the public key; only what you confirm in the wallet gets signed.")}</p>
             </>
           )}
         </div>
