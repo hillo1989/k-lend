@@ -1,8 +1,9 @@
 // Anzeige, wenn keine Wallet im Browser steckt. Am Rechner: Links zu den
 // Erweiterungen. Am Handy gibt es keine Erweiterungen; dort läuft die Seite nur
 // im Browser der Wallet-App. Einen Link, der die App öffnet und die Seite darin
-// lädt, dokumentieren weder Kastle noch KasWare (recherchiert 06.10.2026),
-// daher Anleitung plus „Link kopieren“.
+// lädt, dokumentieren weder Kastle noch KasWare (recherchiert 06.10.2026).
+// Kastles „Explore“ ist eine feste Liste geprüfter Apps (Screenshot des
+// Nutzers 06.10.2026), kein freier Browser.
 import { useState } from "react";
 import { WALLET_LINKS } from "../config";
 import { tr } from "../lib/i18n";
@@ -28,19 +29,26 @@ export function NoWallet({ small = false }: { small?: boolean }) {
       <>
         <p className={cls}>
           {tr(
-            "Auf dem Handy kann die Seite die Wallet-App nicht von außen ansprechen. So geht es:",
-            "On a phone the page cannot reach the wallet app from outside. Here is how:",
+            "Auf dem Handy gibt es keine Browser-Erweiterungen; K.Lend muss im Browser einer Wallet-App laufen.",
+            "Phones have no browser extensions; K.Lend has to run inside a wallet app's browser.",
           )}
         </p>
-        <ol className={cls}>
-          <li>{tr("Link kopieren (Knopf unten).", "Copy the link (button below).")}</li>
+        <ul className={cls}>
+          {platform === "android" && (
+            <li>
+              {tr(
+                "KasWare (Android-App): im eingebauten Browser der App k-lend.com öffnen (Link unten kopieren).",
+                "KasWare (Android app): open k-lend.com in the app's built-in browser (copy the link below).",
+              )}
+            </li>
+          )}
           <li>
-            {platform === "ios"
-              ? tr("Kastle-App öffnen, unten auf „Explore“ tippen.", "Open the Kastle app and tap “Explore” at the bottom.")
-              : tr("Kastle-App öffnen und auf „Explore“ tippen – oder die KasWare-App öffnen und ihren Browser starten.", "Open the Kastle app and tap “Explore” – or open the KasWare app and start its browser.")}
+            {tr(
+              "Kastle: zeigt unter „Explore“ nur geprüfte Apps. K.Lend ist dort noch nicht aufgenommen – bis dahin am Rechner mit der Browser-Erweiterung arbeiten.",
+              "Kastle: “Explore” only lists verified apps. K.Lend is not listed there yet – until then, use the browser extension on a computer.",
+            )}
           </li>
-          <li>{tr("Dort den Link einfügen. K.Lend läuft dann in der Wallet-App und kann sich verbinden.", "Paste the link there. K.Lend then runs inside the wallet app and can connect.")}</li>
-        </ol>
+        </ul>
         <div className="btn-row">
           <button type="button" className="btn btn-primary btn-sm" onClick={() => void copy()}>
             {copied ? tr("Kopiert ✓", "Copied ✓") : tr("Link kopieren", "Copy link")}
