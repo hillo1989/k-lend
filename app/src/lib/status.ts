@@ -167,3 +167,16 @@ export const shortHex = (h: string, head = 6, tail = 6) => (h.length <= head + t
 /** Zahl im Format der aktuellen Sprache (Name historisch: „de“) */
 export const de = (n: number, maxFrac = 2, minFrac = 0) =>
   n.toLocaleString(locale(), { minimumFractionDigits: minFrac, maximumFractionDigits: maxFrac });
+
+/**
+ * Anzeige-Name eines Vaults: Jeder Nutzer zählt seine eigenen Vaults ab 1
+ * („Vault 1“, „Vault 2“ …, in der Reihenfolge des Anlegens). Fremde Vaults
+ * heißen nach den ersten 8 Zeichen ihrer Covenant-ID. Nur Anzeige – intern
+ * zählt die feste Covenant-ID bzw. die Nummer der Zustandsdatei.
+ */
+export function vaultLabel(v: Pick<VaultStatus, "index" | "owner" | "covenantId">, all: readonly Pick<VaultStatus, "index" | "owner">[], me: string | null): string {
+  const mine = me !== null && me !== "" && v.owner.toLowerCase() === me.toLowerCase();
+  if (!mine) return `${tr("Fremder Vault", "Other vault")} ${v.covenantId.slice(0, 8)}`;
+  const n = all.filter((x) => x.owner.toLowerCase() === me.toLowerCase() && x.index <= v.index).length;
+  return `Vault ${n}`;
+}

@@ -51,7 +51,8 @@ function status(vaults: Partial<VaultStatus>[]): DeployedStatus {
 /** Ausschnitt eines Listeneintrags (je Vault ein <li>) */
 function item(html: string, index: number): string {
   const parts = html.split('<li class="vault-item');
-  return parts.find((p) => p.includes(`<strong>Vault ${index}</strong>`)) ?? "";
+  // ohne eigenen Schlüssel stehen die Vaults nach Nummer (Anzeige heißt jetzt „Fremder Vault …“)
+  return parts[index + 1] ?? "";
 }
 
 function render(s: DeployedStatus): string {

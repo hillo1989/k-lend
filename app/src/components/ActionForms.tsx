@@ -8,7 +8,7 @@ import { markBusy } from "../lib/busy";
 import { MAX_MESSAGE_CHARS, PUBLIC_MESSAGE_LABEL, encryptProblem, messageProblem } from "../lib/abo";
 import { precheck } from "../lib/precheck";
 import { useStatus } from "../lib/StatusContext";
-import { de } from "../lib/status";
+import { de, vaultLabel } from "../lib/status";
 import { logTx } from "../lib/txlog";
 import { tr } from "../lib/i18n";
 import { CopyButton, CopyCode } from "./CopyCode";
@@ -222,7 +222,7 @@ export function ActionForms({
         p.rate = cliDecimal(rate, 2);
       }
     }
-    if (signMode === "wallet") return toWalletParams(action, p);
+    if (signMode === "wallet") return toWalletParams(action, p, (i) => live?.vaults.find((v) => v.index === i)?.covenantId);
     return { params: p, problem: null };
   }, [signMode, key, meta, vault, toMode, toKey, toFree, kname, action, useFull, amountStr, amount, amount2Str, amount2, committee, usdStr, usd, rateStr, rate, hasMessage, message, onchain]);
 
@@ -388,7 +388,7 @@ export function ActionForms({
               )}
               {vaults.map((x) => (
                 <option key={x.index} value={x.index}>
-                  Vault {x.index}
+                  {vaultLabel(x, live?.vaults ?? [], key?.xonly ?? null)}
                   {!ownVaults && key && x.owner === key.xonly ? tr(" (deiner)", " (yours)") : ""}
                   {x.stale ? tr(" (gesperrt)", " (blocked)") : ""} · {de(x.collateralKas, 2)} KAS · {tr("Schuld", "Debt")} {de(x.debtGhost, 4)}
                 </option>
@@ -450,7 +450,7 @@ export function ActionForms({
                   )}
                   {vaults.map((x) => (
                     <option key={x.index} value={x.index}>
-                      Vault {x.index}
+                      {vaultLabel(x, live?.vaults ?? [], key?.xonly ?? null)}
                       {!ownVaults && key && x.owner === key.xonly ? tr(" (deiner)", " (yours)") : ""}
                       {x.stale ? tr(" (gesperrt)", " (blocked)") : ""} · {de(x.collateralKas, 2)} KAS · {tr("Schuld", "Debt")} {de(x.debtGhost, 4)}
                       {!ownVaults && x.ratioPct !== null ? ` · ${tr("Quote", "Ratio")} ${de(x.ratioPct, 0)} %` : ""}

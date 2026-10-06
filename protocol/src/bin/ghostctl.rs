@@ -585,8 +585,12 @@ enum WalletCmd {
         /// Kaspa-Adresse der Wallet (kaspa:q…); Gebühr und Einlagen kommen von dort
         #[arg(long)]
         address: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "vault_id")]
         vault: Option<usize>,
+        /// Vault über seine Covenant-ID (64 Hex) statt über die Nummer: die Nummer
+        /// verschiebt sich, wenn ein Vault mit kleinerer Nummer endet (A11-O-15)
+        #[arg(long)]
+        vault_id: Option<String>,
         #[arg(long)]
         kas: Option<f64>,
         #[arg(long)]
@@ -3888,10 +3892,16 @@ fn need_units(v: Option<f64>, name: &str) -> Result<i64, String> {
 #[allow(clippy::too_many_arguments)]
 fn wallet_action_of(d: &Deployment, prefix: kaspa_addresses::Prefix, owner: &[u8], cmd: &WalletCmd) -> Result<kaspa_lending_protocol::wallet_ops::Action, String> {
     use kaspa_lending_protocol::wallet_ops::{Action, ghost_target};
-    let WalletCmd::Build { action, vault, kas, ghost, keep, to, message, onchain_message, min, min_shares, percent, min_kas, min_ghost, .. } = cmd else {
+    let WalletCmd::Build { action, vault, vault_id, kas, ghost, keep, to, message, onchain_message, min, min_shares, percent, min_kas, min_ghost, .. } = cmd else {
         return Err("kein build".into());
     };
-    let vault_n = || vault.ok_or_else(|| "--vault fehlt".to_string()).and_then(|v| d.vaults.get(v).map(|_| v).ok_or(format!("Vault {v} gibt es nicht (vorhanden: {})", d.vaults.len())));
+    let vault_n = || match vault_id {
+        Some(id) => {
+            let id = id.trim().to_lowercase();
+            d.vaults.iter().position(|r| r.vault.cov.to_string() == id).ok_or_else(|| "Diesen Vault gibt es nicht (mehr) – Seite neu laden.".to_string())
+        }
+        None => vault.ok_or_else(|| "--vault fehlt".to_string()).and_then(|v| d.vaults.get(v).map(|_| v).ok_or(format!("Vault {v} gibt es nicht (vorhanden: {})", d.vaults.len()))),
+    };
     let debt = |v: usize| d.vaults[v].vault.state.debt;
     Ok(match action.as_str() {
         "open-vault" => Action::OpenVault { kas: need_units(*kas, "--kas")? as u64 },

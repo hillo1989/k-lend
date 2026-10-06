@@ -648,7 +648,7 @@ fn ausgaenge_werden_beim_namen_genannt() {
     w.by_wallet("open-vault", &u, Action::OpenVault { kas: 200 * E8 as u64 }, Wallet::KasWare);
     let mint = w.plan(&u, &Action::Mint { vault: 0, ghost: E8 }).unwrap();
     let names = whats(&w, &mint);
-    for want in ["Dein Vault 0 – Sicherheit 200 KAS", "Orakel (läuft weiter)", "Minter-Zweig von Vault 0 (läuft weiter)"] {
+    for want in ["Dein Vault 1 – Sicherheit 200 KAS", "Orakel (läuft weiter)", "Minter-Zweig deines Vaults 1 (läuft weiter)"] {
         assert!(names.contains(&want.to_string()), "{want}: {names:?}");
     }
     assert!(names.iter().any(|n| n.starts_with("GHOST-Token")), "{names:?}");

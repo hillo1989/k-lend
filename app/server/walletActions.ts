@@ -161,7 +161,9 @@ export function buildWalletBuildArgs(r: WalletBuildRequest): { network: Network;
   for (const k of Object.keys(params)) if (!WALLET_PARAMS[action].includes(k)) throw new ValidationError(`Unerwarteter Parameter „${k}“ für ${action}.`);
   const has = (k: string) => params[k] !== undefined && params[k] !== null && params[k] !== "";
   const args = ["--network", network, "--json", "wallet", "build", action, "--address", address];
-  const vault = () => args.push("--vault", checkVault(params.vault));
+  // Covenant-ID (64 Hex, fest) oder Nummer (verschiebt sich, A11-O-15)
+  const vault = () =>
+    typeof params.vault === "string" && /^[0-9a-f]{64}$/.test(params.vault) ? args.push("--vault-id", params.vault) : args.push("--vault", checkVault(params.vault));
   switch (action) {
     case "open-vault":
       args.push("--kas", checkAmount(params.kas, "KAS-Betrag"));

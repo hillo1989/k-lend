@@ -517,3 +517,13 @@ describe("Audit 19 A19-7: belegte Tresor-Sperre heißt „gleich erneut“", () 
     expect(readFileSync(path.join(dir, "calls.txt"), "utf8").trim().split("\n")).toHaveLength(2);
   });
 });
+
+describe("Vault über die Covenant-ID (A11-O-15)", () => {
+  it("64 Hex → --vault-id, Zahl → --vault, sonst Fehler", () => {
+    const id = "ab".repeat(32);
+    expect(buildWalletBuildArgs({ network: "mainnet", action: "mint", address: A, params: { vault: id, ghost: "1" } }).args).toEqual(expect.arrayContaining(["--vault-id", id]));
+    expect(buildWalletBuildArgs({ network: "mainnet", action: "mint", address: A, params: { vault: 2, ghost: "1" } }).args).toEqual(expect.arrayContaining(["--vault", "2"]));
+    expect(() => buildWalletBuildArgs({ network: "mainnet", action: "mint", address: A, params: { vault: "AB".repeat(32), ghost: "1" } })).toThrow(ValidationError);
+    expect(() => buildWalletBuildArgs({ network: "mainnet", action: "mint", address: A, params: { vault: "--key=x", ghost: "1" } })).toThrow(ValidationError);
+  });
+});

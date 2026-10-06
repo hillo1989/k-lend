@@ -2,7 +2,7 @@ import { NATIVE, STABLE_SYMBOL } from "../config";
 import { useAccount } from "../lib/AccountContext";
 import type { CliAction } from "../lib/commands";
 import { useStatus } from "../lib/StatusContext";
-import { de, shortHex, xOnlyKey, type VaultStatus } from "../lib/status";
+import { de, shortHex, vaultLabel, xOnlyKey, type VaultStatus } from "../lib/status";
 import { SWEEP_MIN_COLLATERAL_KAS, vaultInterestEatsCollateral, vaultSweepable } from "../lib/precheck";
 import { useWallet } from "../wallet/WalletContext";
 import { HealthBar } from "./ui";
@@ -82,8 +82,8 @@ export function VaultList({ onAction }: { onAction(action: CliAction, vault: num
             return (
               <li key={v.covenantId} className={`vault-item${own ? " own" : ""}${v.stale ? " stale" : ""}`}>
                 <div className="vault-item-head">
-                  <strong>Vault {v.index}</strong>
-                  {own && <span className="tag">{tr("dein Schlüssel", "your key")}</span>}
+                  <strong>{vaultLabel(v, status.vaults, myKey)}</strong>
+                  {own && !acc.publicMode && <span className="tag">{tr("dein Schlüssel", "your key")}</span>}
                   {walletOwn && <span className="tag">{tr("deine Wallet", "your wallet")}</span>}
                   {liquidatable && <span className="tag tag-danger">{tr("liquidierbar", "liquidatable")}</span>}
                   {v.stale && <span className="tag tag-warn">{tr("von Dritten verändert – gesperrt", "changed by third party – blocked")}</span>}
@@ -143,24 +143,24 @@ export function VaultList({ onAction }: { onAction(action: CliAction, vault: num
                   {(own ? QUICK : []).map((q) => (
                     <button key={q.action} type="button" className="btn btn-ghost btn-sm" onClick={() => onAction(q.action, v.index)}>
                       {q.label()}
-                      <span className="sr-only"> Vault {v.index}</span>
+                      <span className="sr-only"> {vaultLabel(v, status.vaults, myKey)}</span>
                     </button>
                   ))}
                   {redeemable && (
                     <button type="button" className="btn btn-ghost btn-sm" onClick={() => onAction("redeem", v.index)}>
                       {tr("Rücknahme", "Redeem")}
-                      <span className="sr-only"> Vault {v.index}</span>
+                      <span className="sr-only"> {vaultLabel(v, status.vaults, myKey)}</span>
                     </button>
                   )}
                   {liquidatable && !frozen && (
                     <button type="button" className="btn btn-danger btn-sm" onClick={() => onAction("liquidate", v.index)}>
-                      {tr("Liquidieren", "Liquidate")}<span className="sr-only"> Vault {v.index}</span>
+                      {tr("Liquidieren", "Liquidate")}<span className="sr-only"> {vaultLabel(v, status.vaults, myKey)}</span>
                     </button>
                   )}
                   {sweepable && (
                     <button type="button" className="btn btn-ghost btn-sm" onClick={() => onAction("sweep", v.index)}>
                       {tr("Auflösen (Zinsadresse)", "Dissolve (interest address)")}
-                      <span className="sr-only"> Vault {v.index}</span>
+                      <span className="sr-only"> {vaultLabel(v, status.vaults, myKey)}</span>
                     </button>
                   )}
                 </div>

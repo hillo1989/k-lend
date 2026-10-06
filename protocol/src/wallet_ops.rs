@@ -717,6 +717,17 @@ pub fn same_shape(m: &Built, r: &Built) -> Result<(), String> {
 
 // --------------------------------------------------------------- Plan ----
 
+/// Nummer eines Vaults unter den Vaults desselben Besitzers (1, 2, 3 …), wie die
+/// Seite sie zeigt: jeder Nutzer zählt seine eigenen Vaults, nur zur Anzeige
+pub fn own_number(d: &Deployment, owner: &[u8], index: usize) -> usize {
+    d.vaults.iter().take(index + 1).filter(|v| v.owner == owner).count()
+}
+
+/// Kurzform einer Covenant-ID für fremde Vaults (erste 8 Hex-Zeichen)
+fn short_cov(c: &impl std::fmt::Display) -> String {
+    c.to_string().chars().take(8).collect()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionPlan {
@@ -791,9 +802,9 @@ impl ActionPlan {
             }
             if let Some((i, v)) = d.vaults.iter().enumerate().find(|(_, v)| v.vault.cov == cov) {
                 return if v.owner == self.owner {
-                    format!("Dein Vault {i} – Sicherheit {}", kas(o.value))
+                    format!("Dein Vault {} – Sicherheit {}", own_number(d, &self.owner, i), kas(o.value))
                 } else {
-                    format!("Vault {i} (läuft weiter)")
+                    format!("Fremder Vault {} (läuft weiter)", short_cov(&v.vault.cov))
                 };
             }
             if let Some(p) = &d.pool {
@@ -809,8 +820,12 @@ impl ActionPlan {
                 if d.ghost_root.as_ref().is_some_and(|r| spk(&r.state.artifact()) == o.script_public_key) {
                     return "GHOST-Wurzel (läuft weiter)".into();
                 }
-                if let Some((i, _)) = d.vaults.iter().enumerate().find(|(_, v)| spk(&v.branch.state.artifact()) == o.script_public_key) {
-                    return format!("Minter-Zweig von Vault {i} (läuft weiter)");
+                if let Some((i, v)) = d.vaults.iter().enumerate().find(|(_, v)| spk(&v.branch.state.artifact()) == o.script_public_key) {
+                    return if v.owner == self.owner {
+                        format!("Minter-Zweig deines Vaults {} (läuft weiter)", own_number(d, &self.owner, i))
+                    } else {
+                        format!("Minter-Zweig des fremden Vaults {} (läuft weiter)", short_cov(&v.vault.cov))
+                    };
                 }
                 if matches!(self.action, Action::OpenVault { .. }) && o.value == ops::BRANCH_VALUE {
                     return format!("Minter-Zweig des neuen Vaults – {}, bleiben dauerhaft gebunden", kas(o.value));

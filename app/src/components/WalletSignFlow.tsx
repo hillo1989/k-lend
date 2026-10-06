@@ -75,6 +75,14 @@ export function WalletConnect() {
   );
 }
 
+/** Prüfergebnis kurz: gültig → nur Urteil und Gebühr; ungültig → alle Zeilen (Gründe) */
+function shortReport(r: Parameters<typeof reportLines>[0]): string[] {
+  const all = reportLines(r);
+  if (!(r.ok && r.valid)) return all;
+  const fee = all.find((l) => l.startsWith("Gebühr") || l.startsWith("Fee"));
+  return fee ? [all[0], fee] : [all[0]];
+}
+
 export function WalletSignFlow({
   network,
   action,
@@ -188,6 +196,8 @@ export function WalletSignFlow({
 
   const b = planFresh ? plan!.b : null;
   const others = b && b.ok ? foreignOutputs(b, address) : [];
+  // Zahlungen an andere Adressen (Senden, Tresor-Empfänger …) bleiben sichtbar
+  const payees = others.filter((o) => o.what === "andere Adresse");
   return (
     <div className="wallet-flow">
       <p className="small muted">
@@ -218,23 +228,34 @@ export function WalletSignFlow({
           <p className="small">
             <strong>{summary}</strong> · {tr("Gebühr", "Fee")} {de((b.feeSompi ?? 0) / 1e8, 8)} KAS · {b.signInputs?.length ?? 0} {tr("Eingänge signiert die Wallet", "inputs signed by the wallet")}
           </p>
-          <ul className="tx-list small">
-            {(b.outputs ?? []).map((o) => (
-              <li key={o.index}>
-                {tr("Ausgang", "Output")} {o.index}: {de(o.kas, 8)} KAS · {o.what}
-                {o.what === "andere Adresse" ? ` → ${o.address}` : ""}
-              </li>
-            ))}
-          </ul>
-          {others.length > 0 && (
-            <p className="small">{tr("Prüfe in der Wallet: Beträge und Empfänger müssen mit dieser Liste übereinstimmen.", "Check in the wallet: amounts and recipients must match this list.")}</p>
+          <p className="small">{tr("Prüfe in der Wallet: Beträge und Empfänger müssen mit dieser Liste übereinstimmen.", "Check in the wallet: amounts and recipients must match this list.")}</p>
+          {/* Ausgänge eingeklappt (Wunsch des Betreibers: kurz halten); Zahlungen an fremde Adressen stehen immer offen da */}
+          {payees.length > 0 && (
+            <ul className="tx-list small">
+              {payees.map((o) => (
+                <li key={o.index}>
+                  {de(o.kas, 8)} KAS → {o.address}
+                </li>
+              ))}
+            </ul>
           )}
+          <details className="small">
+            <summary>{tr("Alle Ausgänge anzeigen", "Show all outputs")}</summary>
+            <ul className="tx-list">
+              {(b.outputs ?? []).map((o) => (
+                <li key={o.index}>
+                  {tr("Ausgang", "Output")} {o.index}: {de(o.kas, 8)} KAS · {o.what}
+                  {o.what === "andere Adresse" ? ` → ${o.address}` : ""}
+                </li>
+              ))}
+            </ul>
+          </details>
         </div>
       )}
 
       {checked && (
         <div className={checked.r.ok && checked.r.valid ? "result ok" : "result err"}>
-          {reportLines(checked.r).map((l, i) => (
+          {shortReport(checked.r).map((l, i) => (
             <p key={i} className="small">
               {l}
             </p>

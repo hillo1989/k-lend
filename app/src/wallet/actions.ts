@@ -71,7 +71,12 @@ export const walletParamsOf = (a: WalletActionName): readonly string[] => ALLOWE
  * Schlüsseldateien gibt es hier nicht: `key` fällt weg, ein Empfänger als
  * Schlüsseldatei wird abgelehnt.
  */
-export function toWalletParams(action: CliAction, p: ActionParams): { params: ActionParams | null; problem: string | null } {
+/**
+ * `vaultId`: Vault-Nummer → Covenant-ID. Mit der Wallet wird der Vault über
+ * seine feste ID angesprochen, nicht über die Nummer, die sich verschiebt,
+ * wenn ein Vault mit kleinerer Nummer endet (A11-O-15).
+ */
+export function toWalletParams(action: CliAction, p: ActionParams, vaultId?: (index: number) => string | undefined): { params: ActionParams | null; problem: string | null } {
   if (!walletSupports(action)) return { params: null, problem: tr("Diese Aktion geht nur mit Schlüsseldatei.", "This action needs a key file.") };
   const out: ActionParams = {};
   for (const [k, v] of Object.entries(p)) {
@@ -79,6 +84,12 @@ export function toWalletParams(action: CliAction, p: ActionParams): { params: Ac
     if (!ALLOWED[action].includes(k)) continue;
     if (k === "to" && typeof v === "string" && v.startsWith("keys/"))
       return { params: null, problem: tr("Mit der Browser-Wallet als Empfänger eine Adresse angeben (keine Schlüsseldatei).", "With the browser wallet, enter an address as recipient (no key file).") };
+    if (k === "vault" && vaultId && typeof v === "number") {
+      const id = vaultId(v);
+      if (!id) return { params: null, problem: tr("Diesen Vault gibt es nicht (mehr) – Seite neu laden.", "This vault no longer exists – reload the page.") };
+      out[k] = id;
+      continue;
+    }
     out[k] = v;
   }
   return { params: out, problem: null };
