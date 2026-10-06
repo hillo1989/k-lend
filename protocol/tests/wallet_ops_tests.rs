@@ -653,3 +653,698 @@ fn ausgaenge_werden_beim_namen_genannt() {
     }
     assert!(names.iter().any(|n| n.starts_with("GHOST-Token")), "{names:?}");
 }
+
+// ------------------------------------------------------------- Tresore ----
+//
+// Daueraufträge mit Tresor (contracts/standing_order.sil) über die Wallet:
+// anlegen, auffüllen, kündigen; Zustand ist die Tresor-Datei (TresorBasis).
+// Zahlen bleibt beim Agenten (tresor::pay_round ohne Nutzerschlüssel).
+
+use kaspa_consensus_core::tx::{ScriptPublicKey, TransactionOutpoint};
+use kaspa_lending_protocol::tresor::{self, TresorFile};
+use wo::{Basis, TresorBasis};
+
+/// 2027-02-01 08:00 UTC (der Simulator beginnt am 2027-01-01)
+const FIRST_DUE: i64 = 1_801_468_800_000;
+
+struct TresorWorld {
+    sim: Sim,
+    basis: TresorBasis,
+}
+
+impl TresorWorld {
+    fn new() -> Self {
+        let sim = Sim::new();
+        let pmt = sim.now_ms as i64;
+        TresorWorld { sim, basis: TresorBasis { file: TresorFile::empty(NET), now: "2027-01-01 10:00".into(), pmt } }
+    }
+    fn plan(&self, k: &Keypair, a: &Action) -> Result<ActionPlan, String> {
+        let (plan, _) = wo::build_plan(&self.basis, a, &addr(k), NET, &self.sim.funds(k).utxos, P, &self.sim.params)?;
+        Ok(ActionPlan::decode(&serde_json::to_string(&plan).unwrap()).unwrap())
+    }
+    fn submit(&self, plan: &ActionPlan, signed: &str) -> Result<Submitted<TresorBasis>, String> {
+        wo::submit(&self.basis, plan, &w::parse_signed(signed).unwrap(), NET, P, &self.sim.params)
+    }
+    /// Ganzer Wallet-Weg; der Simulator muss die Tx annehmen, danach gilt der
+    /// Folgezustand (wie die Übernahme über das Journal bei Annahme)
+    fn by_wallet(&mut self, label: &str, k: &Keypair, a: Action, wl: Wallet) -> Submitted<TresorBasis> {
+        let plan = self.plan(k, &a).unwrap_or_else(|e| panic!("{label}: Plan: {e}"));
+        assert!(plan.tx.inputs.iter().all(|i| i.signature_script.is_empty()), "{label}: Wallet bekommt leere Signaturskripte");
+        let signed = match wl {
+            Wallet::KasWare => kasware_sign(&plan, k, SIG_HASH_ALL),
+            Wallet::Kastle => kastle_sign(&plan, k),
+        };
+        let body = serde_json::json!({ "network": NET, "plan": plan, "signed": signed, "send": true, "confirmMainnet": true }).to_string().len();
+        assert!(body < 768 * 1024, "{label}: submit-Anfrage {body} B");
+        let s = self.submit(&plan, &signed).unwrap_or_else(|e| panic!("{label}: submit: {e}"));
+        assert!(s.report.valid, "{label}: ungültig: {:?} {:?}", s.report.error, s.report.inputs);
+        let b = s.built.clone().unwrap();
+        println!(
+            "{label:<22} {wl:?} Eingänge {} (Wallet {}) | Gebühr {:.5} KAS | Anfrage {} kB",
+            b.tx.inputs.len(),
+            plan.signers.len(),
+            b.fee as f64 / 1e8,
+            body / 1024
+        );
+        self.sim.submit(&b).unwrap_or_else(|e| panic!("{label}: Simulator lehnt ab: {e}"));
+        self.basis = s.next.clone().unwrap();
+        s
+    }
+    /// Wert der UTXO des Tresors `i` im Simulator (Outpoint, Covenant-ID und
+    /// Skript wie in der Datei), None = keine
+    fn utxo_of(&self, i: usize) -> Option<u64> {
+        let r = &self.basis.file.tresore[i];
+        let spk = tresor::TresorShape::of(&r.params).spk(&r.utxo.state);
+        self.sim.utxos.iter().find(|(o, e)| **o == r.utxo.outpoint && e.covenant_id == Some(r.utxo.cov) && e.script_public_key == spk).map(|(_, e)| e.amount)
+    }
+}
+
+/// Miete: 10 KAS monatlich am 1., 08:00 UTC
+fn miete(to: &Keypair, count: i64, fund: u64, message: &str) -> Action {
+    Action::TresorOpen { to: addr(to), amount: 10 * E8, anchor_day: 1, period_ms: 0, first_due: FIRST_DUE, count, fund, max_fee: tresor::DEFAULT_MAX_FEE, message: message.into() }
+}
+
+fn cov_of(tw: &TresorWorld, i: usize) -> String {
+    tw.basis.file.tresore[i].utxo.cov.to_string()
+}
+
+fn whats(tw: &TresorWorld, p: &ActionPlan) -> Vec<String> {
+    p.describe_tresor_outputs(Some(&tw.basis.file), P).iter().map(|o| o["what"].as_str().unwrap().to_string()).collect()
+}
+
+/// Agent im Simulator (tresor::pay_round, ohne Schlüssel des Nutzers)
+struct AgentIo<'a> {
+    sim: &'a mut Sim,
+    key: Option<Keypair>,
+}
+
+impl tresor::TresorIo for AgentIo<'_> {
+    async fn utxos(&mut self, s: &ScriptPublicKey) -> Result<Vec<(TransactionOutpoint, UtxoEntry)>, String> {
+        Ok(self.sim.utxos.iter().filter(|(_, e)| e.script_public_key == *s).map(|(o, e)| (*o, e.clone())).collect())
+    }
+    async fn funds(&mut self) -> Option<ops::Funds> {
+        self.key.map(|k| self.sim.funds(&k))
+    }
+    async fn send(&mut self, _: &str, b: &Built, _: &TresorFile) -> Result<(), String> {
+        self.sim.submit(b)
+    }
+    fn save(&mut self, _: &TresorFile) -> Result<(), String> {
+        Ok(())
+    }
+    fn journal_open(&self) -> bool {
+        false
+    }
+    fn dry_run(&self) -> bool {
+        false
+    }
+    fn now_ms(&self) -> i64 {
+        self.sim.now_ms as i64
+    }
+    fn say(&mut self, _: &str) {}
+}
+
+/// Anlegen, auffüllen, Zahlung durch den Agenten, kündigen – alles, was der
+/// Nutzer signiert, über die Browser-Wallet (KasWare und Kastle); Messkopie
+/// und echte Tx gleich, Ergebnis wie mit Schlüsseldatei
+#[tokio::test]
+async fn tresor_anlegen_auffuellen_zahlen_kuendigen_ueber_die_wallet() {
+    let mut tw = TresorWorld::new();
+    let (u, empf, agent) = (key(), key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    tw.sim.faucet(&agent, 5 * E8 as u64);
+
+    // anlegen: 3 Zahlungen, Startguthaben 3 × (10 + 0,01) + 1 KAS, öffentliche Nachricht
+    let fund = 3 * (10 * E8 as u64 + tresor::DEFAULT_MAX_FEE as u64) + E8 as u64;
+    let plan = tw.plan(&u, &miete(&empf, 3, fund, "Miete Whg. 3")).unwrap();
+    let names = whats(&tw, &plan);
+    assert!(names.contains(&format!("Dein neuer Tresor – 31,03 KAS, zahlt 10 KAS monatlich am 1. an {}", addr(&empf))), "{names:?}");
+    assert!(plan.signers.iter().all(|s| s.kind == "p2pk"), "anlegen: nur eigene KAS");
+    let s = tw.by_wallet("tresor-open", &u, miete(&empf, 3, fund, "Miete Whg. 3"), Wallet::KasWare);
+    assert_eq!(tw.basis.file.tresore.len(), 1);
+    let r = tw.basis.file.tresore[0].clone();
+    assert!(r.wallet && r.key.is_none(), "Wallet-Tresor ohne Schlüsseldatei");
+    assert_eq!((r.params.owner.clone(), r.params.recipient.clone()), (xonly(&u), xonly(&empf)), "Besitzer = Wallet");
+    assert_eq!((r.message.as_str(), r.onchain), ("Miete Whg. 3", true));
+    assert_eq!(r.params.payload_hash, payload_hash(b"Miete Whg. 3"), "Nachricht im Vertrag gebunden");
+    assert_eq!(r.message_check(None), tresor::MessageCheck::Bound);
+    assert_eq!(r.history.last().unwrap().txid, Some(s.built.as_ref().unwrap().tx.id().to_string()));
+    assert_eq!(s.info["tresor"], r.id);
+    assert_eq!(s.info["covered"], 3);
+    assert_eq!(tw.utxo_of(0), Some(fund), "Tresor-UTXO im Netz");
+
+    // gleiche Tx wie `tresor open` mit Schlüsseldatei
+    let mut d = Sim::new();
+    d.faucet(&u, 500 * E8 as u64);
+    let direct = tresor::open(&r.params, &TresorState { next_due: FIRST_DUE, left: 3 }, fund, &d.funds(&u), &d.params).unwrap().0;
+    let b = s.built.as_ref().unwrap();
+    assert_eq!((b.fee, b.budgets.clone(), b.compute_mass, b.storage_mass), (direct.fee, direct.budgets.clone(), direct.compute_mass, direct.storage_mass));
+    assert_eq!(b.tx.outputs, direct.tx.outputs, "gleiche Ausgänge wie mit Schlüsseldatei");
+
+    // auffüllen (Kastle): Tresor-Eingang mit Besitzersignatur + eigene KAS
+    let id = cov_of(&tw, 0);
+    let a = Action::TresorTopup { tresor: id.clone(), kas: 5 * E8 as u64 };
+    let plan = tw.plan(&u, &a).unwrap();
+    assert!(plan.signers.iter().any(|s| s.kind == "entry" && s.entry.as_deref() == Some("topUp") && s.index == 0), "{:?}", plan.signers);
+    let names = whats(&tw, &plan);
+    assert!(names[0].starts_with(&format!("Dein Tresor {} – 36,03 KAS, zahlt 10 KAS monatlich am 1. an kaspa:", r.id)), "{names:?}");
+    let s = tw.by_wallet("tresor-topup", &u, a, Wallet::Kastle);
+    assert_eq!(tw.utxo_of(0), Some(fund + 5 * E8 as u64));
+    assert_eq!(tw.basis.file.tresore[0].utxo.value, fund + 5 * E8 as u64, "Datei nachgeführt");
+    assert_eq!(tw.basis.file.tresore[0].history.last().unwrap().action, "topup");
+    assert_eq!(s.info["covered"], 3);
+
+    // Zahlung zum Termin: der Agent mit eigenem Schlüssel, Gebühr aus dem Tresor
+    tw.sim.set_time(FIRST_DUE as u64 + 10 * 60_000);
+    let (params, pmt) = (tw.sim.params.clone(), tw.sim.now_ms as i64 - tresor::PMT_LAG_MS);
+    let before = (tw.sim.balance(&empf), tw.sim.balance(&agent));
+    let mut file = tw.basis.file.clone();
+    let reps = tresor::pay_round(&mut AgentIo { sim: &mut tw.sim, key: Some(agent) }, &mut file, None, true, pmt, "x", &params).await.unwrap();
+    assert_eq!(reps.iter().map(|r| r.paid).collect::<Vec<_>>(), vec![true], "{reps:?}");
+    assert_eq!(tw.sim.balance(&empf) - before.0, 10 * E8 as u64, "Empfänger bekommt den Betrag");
+    assert_eq!(tw.sim.balance(&agent), before.1, "der Agent zahlt keine Gebühr");
+    assert_eq!(file.tresore[0].utxo.state.left, 2);
+    tw.basis.file = file;
+    let rest = tw.basis.file.tresore[0].utxo.value;
+    assert!(rest > fund + 5 * E8 as u64 - 10 * E8 as u64 - tresor::DEFAULT_MAX_FEE as u64, "nur die nötige Gebühr");
+
+    // kündigen (KasWare): nur der Tresor-Eingang, Gebühr aus dem Tresor
+    let a = Action::TresorCancel { tresor: id.clone() };
+    let plan = tw.plan(&u, &a).unwrap();
+    assert_eq!(plan.signers.len(), 1, "keine eigenen KAS nötig: {:?}", plan.signers);
+    assert_eq!(plan.signers[0].entry.as_deref(), Some("cancel"));
+    assert_eq!(whats(&tw, &plan), vec!["Rest des Tresors zurück an die Wallet".to_string()]);
+    let before = tw.sim.balance(&u);
+    let s = tw.by_wallet("tresor-cancel", &u, a, Wallet::KasWare);
+    let b = s.built.unwrap();
+    assert_eq!(tw.sim.balance(&u) - before, rest - b.fee, "Rest zurück an den Besitzer");
+    assert!(tw.basis.file.tresore[0].ended.is_some(), "in der Datei beendet");
+    assert!(tw.utxo_of(0).is_none());
+    // gleiche Tx wie `tresor cancel` mit Schlüsseldatei
+    let r = &tw.basis.file.tresore[0];
+    let direct = tresor::cancel(&r.params, &r.utxo, &u, &tw.sim.params).unwrap();
+    assert_eq!((direct.tx.outputs.clone(), direct.fee), (b.tx.outputs.clone(), b.fee));
+    // danach nichts mehr
+    let e = tw.plan(&u, &Action::TresorCancel { tresor: id.clone() }).unwrap_err();
+    assert!(e.contains("schon gekündigt"), "{e}");
+}
+
+/// Neubau bitgleich, sonst abgelehnt; fehlende oder fremde Signatur
+/// abgelehnt; einen Folgezustand (also einen Eintrag in der Tresor-Datei)
+/// gibt es nur bei gültiger Signatur, und build/submit ändern die Datei nicht
+#[test]
+fn tresor_plan_wird_neu_gebaut_und_geprueft() {
+    let mut tw = TresorWorld::new();
+    let (u, empf) = (key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    let a = miete(&empf, 2, 25 * E8 as u64, "");
+    let plan = tw.plan(&u, &a).unwrap();
+    let before = serde_json::to_string(&tw.basis.file).unwrap();
+    let ok = tw.submit(&plan, &kasware_sign(&plan, &u, SIG_HASH_ALL)).unwrap();
+    assert!(ok.report.valid && ok.next.as_ref().unwrap().file.tresore.len() == 1);
+    assert_eq!(serde_json::to_string(&tw.basis.file).unwrap(), before, "build und submit ändern die Datei nicht");
+    for (what, signed) in [("fremder Schlüssel", kasware_sign(&plan, &key(), SIG_HASH_ALL)), ("Hashtype NONE", kasware_sign(&plan, &u, SIG_HASH_NONE))] {
+        let s = tw.submit(&plan, &signed).unwrap();
+        assert!(!s.report.valid && s.built.is_none() && s.next.is_none(), "{what}");
+    }
+    let mut v: serde_json::Value = serde_json::from_str(&serde_json::from_str::<String>(&kasware_sign(&plan, &u, SIG_HASH_ALL)).unwrap()).unwrap();
+    v["inputs"][0]["signatureScript"] = serde_json::json!("");
+    let s = tw.submit(&plan, &v.to_string()).unwrap();
+    assert!(!s.report.valid && s.next.is_none(), "ohne Signatur");
+    // veränderter Plan: anderer Empfänger, Startguthaben, Anzahl, Nachricht
+    let fremd = key();
+    for (what, a2) in [
+        ("Empfänger", miete(&fremd, 2, 25 * E8 as u64, "")),
+        ("Startguthaben", miete(&empf, 2, 26 * E8 as u64, "")),
+        ("Anzahl", miete(&empf, -1, 25 * E8 as u64, "")),
+        ("Nachricht", miete(&empf, 2, 25 * E8 as u64, "Miete")),
+    ] {
+        let mut p2 = plan.clone();
+        p2.action = a2;
+        let e = tw.submit(&p2, &kasware_sign(&p2, &u, SIG_HASH_ALL)).err().unwrap_or_else(|| panic!("{what}: angenommen"));
+        assert!(e.contains("Plan passt nicht"), "{what}: {e}");
+    }
+    // Ausgang umgeleitet
+    let mut p3 = plan.clone();
+    p3.tx.outputs[0].script_public_key = p2pk_spk(&xonly(&fremd));
+    assert!(tw.submit(&p3, &kasware_sign(&p3, &u, SIG_HASH_ALL)).err().unwrap().contains("Plan passt nicht"));
+    // Tresor-Aktion nicht gegen den GHOST-Zustand und umgekehrt
+    let gw = World::new();
+    assert!(wo::build_plan(&gw.dep, &a, &addr(&u), NET, &tw.sim.funds(&u).utxos, P, &tw.sim.params).unwrap_err().contains("Tresor-Datei"));
+    assert!(tw.plan(&u, &Action::Send { to: addr(&empf), kas: E8 as u64, payload: vec![] }).unwrap_err().contains("GHOST-Zustand"));
+}
+
+/// Nur der Besitzer: ein Fremder (auch der Empfänger) bekommt für Auffüllen
+/// und Kündigen keinen Plan; seine Signatur auf dem Plan des Besitzers ist
+/// ungültig, ein auf ihn umgeschriebener Plan scheitert beim Neubau
+#[test]
+fn fremder_kann_tresor_weder_kuendigen_noch_auffuellen() {
+    let mut tw = TresorWorld::new();
+    let (u, empf, fremd) = (key(), key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    tw.sim.faucet(&fremd, 500 * E8 as u64);
+    tw.sim.faucet(&empf, 10 * E8 as u64);
+    tw.by_wallet("tresor-open", &u, miete(&empf, 2, 25 * E8 as u64, ""), Wallet::KasWare);
+    let id = cov_of(&tw, 0);
+    for k in [&fremd, &empf] {
+        for a in [Action::TresorCancel { tresor: id.clone() }, Action::TresorTopup { tresor: id.clone(), kas: E8 as u64 }] {
+            let e = tw.plan(k, &a).unwrap_err();
+            assert!(e.contains("gehört nicht zu dieser Adresse"), "{e}");
+        }
+    }
+    let plan = tw.plan(&u, &Action::TresorCancel { tresor: id.clone() }).unwrap();
+    let s = tw.submit(&plan, &kastle_sign(&plan, &fremd)).unwrap();
+    assert!(!s.report.valid && s.next.is_none());
+    let mut p2 = plan.clone();
+    p2.owner = xonly(&fremd);
+    p2.address = addr(&fremd);
+    let e = tw.submit(&p2, &kasware_sign(&p2, &fremd, SIG_HASH_ALL)).err().unwrap();
+    assert!(e.contains("gehört nicht"), "{e}");
+    let plan = tw.plan(&u, &Action::TresorTopup { tresor: id.clone(), kas: E8 as u64 }).unwrap();
+    let s = tw.submit(&plan, &kasware_sign(&plan, &fremd, SIG_HASH_ALL)).unwrap();
+    assert!(!s.report.valid && s.next.is_none());
+    assert_eq!(tw.utxo_of(0), Some(25 * E8 as u64), "Tresor unberührt");
+    assert!(tw.plan(&u, &Action::TresorCancel { tresor: "ab".repeat(32) }).unwrap_err().contains("nicht bekannt"));
+    assert!(tw.plan(&u, &Action::TresorCancel { tresor: id[..8].into() }).unwrap_err().contains("64 Hex"));
+}
+
+/// Veralteter Plan: zahlt der Agent zwischen Bauen und Senden, passt der
+/// Kündigungsplan nicht mehr (anderer Tresor-Ausgang) – neu bauen geht
+#[tokio::test]
+async fn tresor_veralteter_plan_nach_zahlung_abgelehnt() {
+    let mut tw = TresorWorld::new();
+    let (u, empf) = (key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    tw.by_wallet("tresor-open", &u, miete(&empf, 3, 40 * E8 as u64, ""), Wallet::KasWare);
+    let id = cov_of(&tw, 0);
+    let plan = tw.plan(&u, &Action::TresorCancel { tresor: id.clone() }).unwrap();
+    let signed = kasware_sign(&plan, &u, SIG_HASH_ALL);
+    tw.sim.set_time(FIRST_DUE as u64 + 10 * 60_000);
+    let (params, pmt) = (tw.sim.params.clone(), tw.sim.now_ms as i64 - tresor::PMT_LAG_MS);
+    let mut file = tw.basis.file.clone();
+    let reps = tresor::pay_round(&mut AgentIo { sim: &mut tw.sim, key: None }, &mut file, None, false, pmt, "x", &params).await.unwrap();
+    assert!(reps[0].paid, "{reps:?}");
+    tw.basis.file = file;
+    let e = tw.submit(&plan, &signed).err().unwrap();
+    assert!(e.contains("Plan passt nicht"), "{e}");
+    tw.by_wallet("tresor-cancel neu", &u, Action::TresorCancel { tresor: id }, Wallet::Kastle);
+}
+
+/// A17-1 für Tresore: Gehört ein Tresor schon dem Ersatzschlüssel dieses
+/// Baus, bekommt er in der Messkopie einen neutralen Besitzer und stört nicht
+#[test]
+fn tresor_messkopie_neutralisiert_vorbesitz_des_ersatzschluessels() {
+    let mut tw = TresorWorld::new();
+    let (u, empf, k) = (key(), key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    tw.sim.faucet(&k, 500 * E8 as u64);
+    tw.by_wallet("tresor-open k", &k, miete(&empf, 2, 25 * E8 as u64, ""), Wallet::KasWare);
+    tw.by_wallet("tresor-open u", &u, miete(&empf, 2, 25 * E8 as u64, ""), Wallet::KasWare);
+    let id = cov_of(&tw, 1);
+    let m = tw.basis.mirror(&xonly(&u), &xonly(&k));
+    assert_eq!(m.file.tresore[1].params.owner, xonly(&k), "Tresor des Nutzers in der Messkopie beim Ersatzschlüssel");
+    assert!(m.file.tresore[0].params.owner != xonly(&k) && m.file.tresore[0].params.owner != xonly(&u), "Vorbesitz neutral");
+    w::with_mirror_key(k.secret_bytes(), || {
+        tw.by_wallet("tresor-topup u", &u, Action::TresorTopup { tresor: id.clone(), kas: E8 as u64 }, Wallet::KasWare);
+        tw.by_wallet("tresor-cancel u", &u, Action::TresorCancel { tresor: id.clone() }, Wallet::Kastle);
+    });
+    assert!(tw.basis.file.tresore[1].ended.is_some() && tw.basis.file.tresore[0].ended.is_none());
+}
+
+/// Grenzen gegen eine vollgeschriebene Tresor-Datei und Eingaben: höchstens
+/// MAX_WALLET_PER_OWNER laufende je Besitzer; ist die Datei voll, fallen
+/// gekündigte Wallet-Tresore heraus, sonst abgelehnt; Prüfungen wie `tresor open`
+#[test]
+fn tresor_grenzen_und_eingaben() {
+    let mut tw = TresorWorld::new();
+    let (u, empf) = (key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    tw.by_wallet("tresor-open", &u, miete(&empf, 2, 25 * E8 as u64, ""), Wallet::KasWare);
+    let r = tw.basis.file.tresore[0].clone();
+    for n in 1..tresor::MAX_WALLET_PER_OWNER {
+        let mut x = r.clone();
+        x.utxo.cov = kaspa_consensus_core::Hash::from_bytes([n as u8; 32]);
+        tw.basis.file.tresore.push(x);
+    }
+    let base = || miete(&empf, 2, 25 * E8 as u64, "");
+    let e = tw.plan(&u, &base()).unwrap_err();
+    assert!(e.contains("laufende Tresore"), "{e}");
+    tw.basis.file.tresore[3].ended = Some("x".into());
+    assert!(tw.plan(&u, &base()).is_ok(), "ein gekündigter zählt nicht");
+    // Datei voll
+    let cov = |n: usize| {
+        let mut h = [7u8; 32];
+        h[..8].copy_from_slice(&(n as u64).to_le_bytes());
+        kaspa_consensus_core::Hash::from_bytes(h)
+    };
+    let mut f = TresorFile::empty(NET);
+    for n in 0..tresor::MAX_FILE_TRESORE {
+        let mut x = r.clone();
+        x.params.owner = xonly(&empf);
+        x.utxo.cov = cov(n);
+        f.tresore.push(x);
+    }
+    tw.basis.file = f;
+    assert!(tw.plan(&u, &base()).unwrap_err().contains("kein Platz"));
+    tw.basis.file.tresore[5].ended = Some("x".into());
+    let plan = tw.plan(&u, &base()).unwrap();
+    let s = tw.submit(&plan, &kasware_sign(&plan, &u, SIG_HASH_ALL)).unwrap();
+    let next = s.next.unwrap().file;
+    assert_eq!(next.tresore.len(), tresor::MAX_FILE_TRESORE, "der gekündigte ist ersetzt");
+    assert!(next.tresore.iter().all(|r| r.ended.is_none()));
+    tw.basis.file = TresorFile::empty(NET);
+    // Eingaben wie `tresor open`; Nachricht nur so, wie sie in jede Zahlung kommt
+    let bad = |a: Action| tw.plan(&u, &a).unwrap_err();
+    let with = |f: &dyn Fn(&mut i64, &mut i64, &mut i64, &mut i64, &mut i64)| {
+        let mut a = base();
+        if let Action::TresorOpen { amount, max_fee, count, anchor_day, first_due, .. } = &mut a {
+            f(amount, max_fee, count, anchor_day, first_due);
+        }
+        a
+    };
+    assert!(bad(with(&|a, _, _, _, _| *a = E8 - 1)).contains("mindestens 1 KAS"));
+    assert!(bad(with(&|_, m, _, _, _| *m = tresor::MIN_MAX_FEE - 1)).contains("Höchstgebühr"));
+    assert!(bad(with(&|_, m, _, _, _| *m = tresor::MAX_MAX_FEE + 1)).contains("Höchstgebühr"));
+    assert!(bad(with(&|_, _, c, _, _| *c = 0)).contains("Anzahl"));
+    assert!(bad(with(&|_, _, c, _, _| *c = -2)).contains("Anzahl"));
+    assert!(bad(with(&|_, _, _, d, _| *d = 2)).contains("Kalendertag"));
+    assert!(bad(with(&|_, _, _, d, t| {
+        *d = 0;
+        *t = 1_000
+    }))
+    .contains("Intervall"));
+    assert!(bad(miete(&empf, 2, 25 * E8 as u64, " Miete")).contains("Leerzeichen"));
+    assert!(bad(miete(&empf, 2, 25 * E8 as u64, "a\nb")).contains("Nachricht"));
+    assert!(bad(miete(&u, 2, 25 * E8 as u64, "")).contains("Absender selbst"));
+    assert!(bad(miete(&empf, 2, 10 * E8 as u64, "")).contains("Startguthaben zu klein"));
+    let mut a = base();
+    if let Action::TresorOpen { to, .. } = &mut a {
+        *to = w::address_of_xonly(&xonly(&empf), Prefix::Testnet);
+    }
+    assert!(bad(a).contains("Netz"), "Adresse eines anderen Netzes");
+}
+
+// ------------------------------------------------------------- Audit 19 ----
+// Tresor mit Browser-Wallet: Terminregel auch in submit (A19-1), Agent
+// reihum (A19-1), Besitzer vor der Suche und begrenzte Suche (A19-2),
+// Plätze der Tresor-Datei (A19-3), Kurz-ID (A19-9).
+
+use kaspa_lending_protocol::standing::DAY_MS;
+
+/// 1 KAS täglich, unbegrenzt, kleinste Höchstgebühr (der Fall aus dem Audit)
+fn taeglich(to: &Keypair, first_due: i64, fund: u64) -> Action {
+    Action::TresorOpen { to: addr(to), amount: E8, anchor_day: 0, period_ms: DAY_MS, first_due, count: -1, fund, max_fee: tresor::MIN_MAX_FEE, message: String::new() }
+}
+
+/// Agent im Simulator mit Zähler: Node-Abfragen, höchstens `sends` Sendungen
+/// je Runde (danach „abgebrochen“ wie beim Zeitlimit), gespeicherte Stände;
+/// Abfragen zum Skript `hang` antworten nie (langsamer Node)
+struct PruefIo<'a> {
+    sim: &'a mut Sim,
+    lookups: usize,
+    sends: usize,
+    hang: Option<ScriptPublicKey>,
+    saved: Vec<TresorFile>,
+}
+
+impl<'a> PruefIo<'a> {
+    fn new(sim: &'a mut Sim, sends: usize) -> Self {
+        PruefIo { sim, lookups: 0, sends, hang: None, saved: vec![] }
+    }
+}
+
+impl tresor::TresorIo for PruefIo<'_> {
+    async fn utxos(&mut self, s: &ScriptPublicKey) -> Result<Vec<(TransactionOutpoint, UtxoEntry)>, String> {
+        if self.hang.as_ref() == Some(s) {
+            std::future::pending::<()>().await;
+        }
+        self.lookups += 1;
+        Ok(self.sim.utxos.iter().filter(|(_, e)| e.script_public_key == *s).map(|(o, e)| (*o, e.clone())).collect())
+    }
+    async fn funds(&mut self) -> Option<ops::Funds> {
+        None
+    }
+    async fn send(&mut self, _: &str, b: &Built, _: &TresorFile) -> Result<(), String> {
+        if self.sends == 0 {
+            return Err("abgebrochen".into());
+        }
+        self.sends -= 1;
+        self.sim.submit(b)
+    }
+    fn save(&mut self, f: &TresorFile) -> Result<(), String> {
+        self.saved.push(f.clone());
+        Ok(())
+    }
+    fn journal_open(&self) -> bool {
+        false
+    }
+    fn dry_run(&self) -> bool {
+        false
+    }
+    fn now_ms(&self) -> i64 {
+        self.sim.now_ms as i64
+    }
+    fn say(&mut self, _: &str) {}
+}
+
+/// A19-1 (hoch), genau der Fall aus dem Audit: Ein selbst gebauter Plan mit
+/// erstem Termin 2000-01-01 und täglichem Intervall, von der eigenen Wallet
+/// signiert. Die Regel „nicht in der Vergangenheit“ stand nur im build-Pfad
+/// von ghostctl; submit baute die Aktion aus dem Plan bitgleich nach und nahm
+/// sie an (≈ 2 000 Termine Rückstand). Jetzt prüft run_tresor – also build
+/// UND der Neubau in submit – mit der Past Median Time; dazu höchstens ein
+/// Jahr voraus.
+#[test]
+fn a19_1_vergangener_termin_im_submit_abgelehnt() {
+    let mut tw = TresorWorld::new();
+    let (u, empf) = (key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    let first_due: i64 = 946_684_800_000; // 2000-01-01 00:00 UTC
+    let a = taeglich(&empf, first_due, 100 * E8 as u64);
+    assert!(tw.plan(&u, &a).unwrap_err().contains("Vergangenheit"), "build lehnt ab");
+    // der Angreifer baut den Plan selbst (hier: build_plan mit einer Uhr im
+    // Jahr 2000 – die Tx hängt nur von Aktion und Funding ab) und signiert
+    let mut alt = tw.basis.clone();
+    alt.pmt = first_due;
+    let (plan, _) = wo::build_plan(&alt, &a, &addr(&u), NET, &tw.sim.funds(&u).utxos, P, &tw.sim.params).unwrap();
+    let plan = ActionPlan::decode(&serde_json::to_string(&plan).unwrap()).unwrap();
+    let signed = kasware_sign(&plan, &u, SIG_HASH_ALL);
+    let damals = wo::submit(&alt, &plan, &w::parse_signed(&signed).unwrap(), NET, P, &tw.sim.params).unwrap();
+    assert!(damals.report.valid, "Plan und Signatur an sich gültig");
+    let p = TresorParams { owner: vec![], recipient: vec![], amount: E8, anchor_day: 0, period_ms: DAY_MS, max_fee: 0, payload_hash: vec![] };
+    assert!(tresor::backlog(&p, &TresorState { next_due: first_due, left: -1 }, tw.basis.pmt) > 1_000, "das wäre der Rückstand");
+    let e = tw.submit(&plan, &signed).err().expect("submit darf den Termin 2000 nicht annehmen");
+    assert!(e.contains("Vergangenheit"), "{e}");
+    assert!(tw.basis.file.tresore.is_empty());
+    // Grenzen: ein Tag zurück (heute 00:00 UTC aus jeder Zeitzone) geht, ein Jahr voraus auch
+    let now = tw.basis.pmt;
+    assert!(tw.plan(&u, &taeglich(&empf, now - DAY_MS, 100 * E8 as u64)).is_ok());
+    assert!(tw.plan(&u, &taeglich(&empf, now - DAY_MS - 1, 100 * E8 as u64)).unwrap_err().contains("Vergangenheit"));
+    assert!(tw.plan(&u, &taeglich(&empf, now + tresor::MAX_FIRST_DUE_AHEAD_MS, 100 * E8 as u64)).is_ok());
+    assert!(tw.plan(&u, &taeglich(&empf, now + tresor::MAX_FIRST_DUE_AHEAD_MS + 1, 100 * E8 as u64)).unwrap_err().contains("ein Jahr"));
+    // auch die Obergrenze gilt im Neubau von submit (Termin 2199 aus A19-3)
+    let weit: i64 = 7_226_582_400_000; // 2199-01-01
+    let mut zukunft = tw.basis.clone();
+    zukunft.pmt = weit - DAY_MS;
+    let b = taeglich(&empf, weit, 100 * E8 as u64);
+    let (plan, _) = wo::build_plan(&zukunft, &b, &addr(&u), NET, &tw.sim.funds(&u).utxos, P, &tw.sim.params).unwrap();
+    let plan = ActionPlan::decode(&serde_json::to_string(&plan).unwrap()).unwrap();
+    let e = tw.submit(&plan, &kasware_sign(&plan, &u, SIG_HASH_ALL)).err().expect("Termin 2199 abgelehnt");
+    assert!(e.contains("ein Jahr"), "{e}");
+}
+
+/// A19-1, Agent: fällige Tresore reihum. Ein Tresor mit Rückstand (Agent
+/// war aus, oder ein alter Tresor) kam vorher in jeder Runde zuerst dran und
+/// verbrauchte die Sendezeit; ein später angelegter kam nie an die Reihe.
+/// Hier sendet jede Runde nur einmal (wie beim Zeitlimit des Agenten).
+#[tokio::test]
+async fn a19_1_agent_bedient_faellige_tresore_reihum() {
+    let mut tw = TresorWorld::new();
+    let (u, v, empf) = (key(), key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    tw.sim.faucet(&v, 500 * E8 as u64);
+    let start = tw.basis.pmt;
+    tw.by_wallet("A (alt)", &u, taeglich(&empf, start + 3_600_000, 100 * E8 as u64), Wallet::KasWare);
+    tw.sim.set_time((start + 30 * DAY_MS) as u64);
+    tw.basis.pmt = tw.sim.now_ms as i64;
+    tw.by_wallet("B (neu)", &v, taeglich(&empf, tw.basis.pmt - 3_600_000, 100 * E8 as u64), Wallet::Kastle);
+    // beide im Rückstand: A gut 30 Termine, B 5
+    tw.sim.set_time((start + 35 * DAY_MS) as u64);
+    let (ida, idb) = (tw.basis.file.tresore[0].id.clone(), tw.basis.file.tresore[1].id.clone());
+    let params = tw.sim.params.clone();
+    let mut file = tw.basis.file.clone();
+    let mut paid = vec![];
+    for _ in 0..4 {
+        let pmt = tw.sim.now_ms as i64 - tresor::PMT_LAG_MS;
+        let mut io = PruefIo::new(&mut tw.sim, 1);
+        let reps = tresor::pay_round(&mut io, &mut file, None, true, pmt, "x", &params).await.unwrap();
+        paid.extend(reps.into_iter().filter(|r| r.paid).map(|r| r.id));
+    }
+    let n = |id: &str| paid.iter().filter(|p| *p == id).count();
+    println!("A19-1 reihum: A (Rückstand {}) {}×, B {}×", tresor::backlog(&file.tresore[0].params, &file.tresore[0].utxo.state, tw.sim.now_ms as i64), n(&ida), n(&idb));
+    assert_eq!(paid, vec![ida.clone(), idb.clone(), ida.clone(), idb.clone()], "abwechselnd, nicht immer der erste der Datei");
+    assert!(file.tresore.iter().all(|r| r.last_paid_ms.is_some()));
+}
+
+/// A19-2: Auffüllen/Kündigen über die Seite prüft den Besitzer, BEVOR am
+/// Node gesucht wird, und sucht höchstens PUBLIC_FOLLOW Zustände. Vorher:
+/// bis zu 2 000 Abfragen je Anfrage für jede bekannte Tresor-ID.
+#[tokio::test]
+async fn a19_2_besitzer_vor_der_suche_und_begrenzt() {
+    let mut tw = TresorWorld::new();
+    let (u, empf, fremd) = (key(), key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    let pmt0 = tw.basis.pmt;
+    tw.by_wallet("tresor-open", &u, taeglich(&empf, pmt0 + 3_600_000, 10 * E8 as u64), Wallet::KasWare);
+    let id = cov_of(&tw, 0);
+    let cancel = Action::TresorCancel { tresor: id.clone() };
+    let mut file = tw.basis.file.clone();
+    let mut io = PruefIo::new(&mut tw.sim, 0);
+    // fremd, unbekannt, Anlegen: keine einzige Abfrage
+    let e = wo::follow_for_wallet(&mut io, &mut file, &cancel, &xonly(&fremd), pmt0, "x").await.unwrap_err();
+    assert!(e.contains("gehört nicht"), "{e}");
+    let e = wo::follow_for_wallet(&mut io, &mut file, &Action::TresorCancel { tresor: "ab".repeat(32) }, &xonly(&u), pmt0, "x").await.unwrap_err();
+    assert!(e.contains("nicht bekannt"), "{e}");
+    assert!(wo::follow_for_wallet(&mut io, &mut file, &taeglich(&empf, pmt0, 10 * E8 as u64), &xonly(&u), pmt0, "x").await.unwrap().is_none());
+    assert_eq!(io.lookups, 0, "vor der Besitzerprüfung keine Node-Abfrage");
+    // eigener, laufender Tresor: eine Abfrage
+    assert!(wo::follow_for_wallet(&mut io, &mut file, &cancel, &xonly(&u), pmt0, "x").await.unwrap().is_none());
+    assert_eq!(io.lookups, 1);
+    // am Server vorbei gekündigt, danach 2 500 Tage vergangen (Rückstand > MAX_FOLLOW)
+    let r = file.tresore[0].clone();
+    let b = tresor::cancel(&r.params, &r.utxo, &u, &io.sim.params).unwrap();
+    io.sim.submit(&b).unwrap();
+    io.sim.set_time((pmt0 + 2_500 * DAY_MS) as u64);
+    let pmt = io.sim.now_ms as i64;
+    io.lookups = 0;
+    let mut voll = file.clone();
+    tresor::follow(&mut io, &mut voll.tresore[0], pmt, "x", tresor::Search::Full).await.unwrap();
+    let full = io.lookups;
+    io.lookups = 0;
+    let note = wo::follow_for_wallet(&mut io, &mut file, &cancel, &xonly(&u), pmt, "x").await.unwrap();
+    println!("A19-2 Abfragen je öffentlicher Anfrage: {} statt {full}", io.lookups);
+    assert_eq!((full, io.lookups), (tresor::MAX_FOLLOW, tresor::PUBLIC_FOLLOW));
+    assert!(note.unwrap().contains("nicht auffindbar") && file.tresore[0].missing.is_some());
+    // als fehlend markiert: gar keine Suche mehr
+    io.lookups = 0;
+    assert!(wo::follow_for_wallet(&mut io, &mut file, &cancel, &xonly(&u), pmt, "x").await.unwrap_err().contains("nicht auffindbar"));
+    assert_eq!(io.lookups, 0);
+}
+
+/// A19-2, Agent: Was die erste (teure) Suche nach einem verschwundenen
+/// Tresor ergibt, wird sofort gesichert. Vorher speicherte pay_round erst vor
+/// einer Sendung oder am Ende; brach das Zeitlimit die Runde vorher ab (hier:
+/// ein Node, der beim nächsten Tresor nicht antwortet), suchte die nächste
+/// Runde wieder alles ab.
+#[tokio::test]
+async fn a19_2_fehlender_tresor_bleibt_nach_abbruch_markiert() {
+    let mut tw = TresorWorld::new();
+    let (u, empf) = (key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    let pmt0 = tw.basis.pmt;
+    tw.by_wallet("A", &u, taeglich(&empf, pmt0 + 3_600_000, 10 * E8 as u64), Wallet::KasWare);
+    // anderer Termin, also anderes Skript als A
+    tw.by_wallet("B", &u, taeglich(&empf, pmt0 + 7_200_000, 10 * E8 as u64), Wallet::KasWare);
+    let mut file = tw.basis.file.clone();
+    let r = file.tresore[0].clone();
+    let b = tresor::cancel(&r.params, &r.utxo, &u, &tw.sim.params).unwrap();
+    tw.sim.submit(&b).unwrap();
+    tw.sim.set_time((pmt0 + 3 * DAY_MS) as u64);
+    let (params, pmt) = (tw.sim.params.clone(), tw.sim.now_ms as i64 - tresor::PMT_LAG_MS);
+    let hang = tresor::TresorShape::of(&file.tresore[1].params).spk(&file.tresore[1].utxo.state);
+    let mut io = PruefIo::new(&mut tw.sim, 1);
+    io.hang = Some(hang);
+    let round = tresor::pay_round(&mut io, &mut file, None, true, pmt, "x", &params);
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(300), round).await.is_err(), "Runde hängt am zweiten Tresor");
+    let saved = io.saved.last().expect("vor dem Abbruch gesichert");
+    assert!(saved.tresore[0].missing.is_some() && saved.tresore[0].retry_after.is_some(), "Markierung „missing“ gesichert");
+    assert!(saved.tresore[1].missing.is_none());
+}
+
+/// A19-3: Plätze der Tresor-Datei. Vorher belegten 1 000 nie fällige
+/// Wallet-Tresore (Termin 2199, je ≈ 2 KAS) die Datei dauerhaft. Jetzt zählen
+/// nur Tresore, die bald etwas kosten (laufend, zahlbar, binnen 32 Tagen
+/// fällig); ruhende zählen nur gegen die viel größere Gesamtgrenze, und aus
+/// der vollen Datei fallen gekündigte und seit über einer Woche fehlende
+/// Wallet-Tresore – laufende mit Guthaben nie.
+#[test]
+fn a19_3_ruhende_tresore_belegen_keine_plaetze() {
+    let mut tw = TresorWorld::new();
+    let (u, empf) = (key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    tw.by_wallet("tresor-open", &u, miete(&empf, 2, 25 * E8 as u64, ""), Wallet::KasWare);
+    let r = tw.basis.file.tresore[0].clone();
+    let pmt = tw.basis.pmt;
+    assert!(r.busy(pmt), "Miete im nächsten Monat belegt einen Platz");
+    let fill = |n: usize, f: &dyn Fn(&mut tresor::TresorRec)| {
+        let mut file = TresorFile::empty(NET);
+        for i in 0..n {
+            let mut x = r.clone();
+            x.params.owner = xonly(&empf);
+            let mut h = [7u8; 32];
+            h[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            x.utxo.cov = kaspa_consensus_core::Hash::from_bytes(h);
+            f(&mut x);
+            file.tresore.push(x);
+        }
+        file
+    };
+    let base = || miete(&empf, 2, 25 * E8 as u64, "");
+    let full = |tw: &TresorWorld| tw.plan(&u, &base()).err().is_some_and(|e| e.contains("kein Platz"));
+    tw.basis.file = fill(tresor::MAX_FILE_TRESORE, &|_| {});
+    assert!(full(&tw), "1 000 bald fällige: voll");
+    tw.basis.file = fill(tresor::MAX_FILE_TRESORE - 1, &|_| {});
+    assert!(!full(&tw));
+    let ruhend: [(&str, &dyn Fn(&mut tresor::TresorRec)); 4] = [
+        ("Termin in 200 Tagen", &|x| x.utxo.state.next_due = pmt + 200 * DAY_MS),
+        ("leer", &|x| x.utxo.value = (x.params.amount + x.params.max_fee) as u64),
+        ("erledigt", &|x| x.utxo.state.left = 0),
+        ("gekündigt", &|x| x.ended = Some("x".into())),
+    ];
+    for (what, f) in ruhend {
+        tw.basis.file = fill(tresor::MAX_FILE_TRESORE, f);
+        assert!(!full(&tw), "{what}: ruht, belegt keinen Platz");
+    }
+    // Gesamtgrenze: ruhende bis MAX_FILE_ALL
+    let far = |x: &mut tresor::TresorRec| x.utxo.state.next_due = pmt + 200 * DAY_MS;
+    tw.basis.file = fill(tresor::MAX_FILE_ALL, &far);
+    assert!(full(&tw), "Gesamtgrenze");
+    // ein gekündigter Wallet-Tresor fällt heraus
+    tw.basis.file.tresore[7].ended = Some("x".into());
+    let plan = tw.plan(&u, &base()).unwrap();
+    let next = tw.submit(&plan, &kasware_sign(&plan, &u, SIG_HASH_ALL)).unwrap().next.unwrap().file;
+    assert_eq!(next.tresore.len(), tresor::MAX_FILE_ALL);
+    assert!(next.tresore.iter().all(|r| r.ended.is_none()), "der gekündigte ist ersetzt");
+    // fehlend: erst nach der Woche erneuten Nachsehens
+    tw.basis.file = fill(tresor::MAX_FILE_ALL, &far);
+    tw.basis.file.tresore[9].missing = Some("x".into());
+    tw.basis.file.tresore[9].missing_ms = Some(pmt - tresor::MISSING_RECHECK_FOR_MS + 60_000);
+    assert!(full(&tw), "frisch fehlend bleibt");
+    tw.basis.file.tresore[9].missing_ms = Some(pmt - tresor::MISSING_RECHECK_FOR_MS - 60_000);
+    assert!(!full(&tw), "nach einer Woche fehlend fällt heraus");
+    // Tresore des Betreibers (Schlüsseldatei) fallen nie heraus
+    tw.basis.file = fill(tresor::MAX_FILE_ALL, &|x| {
+        far(x);
+        x.wallet = false;
+        x.ended = Some("x".into());
+    });
+    assert!(full(&tw));
+    assert_eq!(tresor::MAX_WALLET_PER_OWNER, 10);
+}
+
+/// A19-9: Bei mehrdeutiger Kurz-ID nennt `find` die vollen Covenant-IDs
+#[test]
+fn a19_9_mehrdeutige_kurz_id_nennt_die_vollen() {
+    let mut tw = TresorWorld::new();
+    let (u, empf) = (key(), key());
+    tw.sim.faucet(&u, 500 * E8 as u64);
+    tw.by_wallet("tresor-open", &u, miete(&empf, 2, 25 * E8 as u64, ""), Wallet::KasWare);
+    let mut f = tw.basis.file.clone();
+    let mut x = f.tresore[0].clone();
+    let mut h = x.utxo.cov.as_bytes();
+    h[31] ^= 1;
+    x.utxo.cov = kaspa_consensus_core::Hash::from_bytes(h);
+    f.tresore.push(x.clone());
+    let e = f.find(&x.id).unwrap_err();
+    assert!(e.contains("mehrdeutig") && e.contains(&f.tresore[0].utxo.cov.to_string()) && e.contains(&x.utxo.cov.to_string()), "{e}");
+    assert_eq!(f.find(&x.utxo.cov.to_string()).unwrap(), 1, "volle ID eindeutig");
+}

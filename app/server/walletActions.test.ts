@@ -18,6 +18,7 @@ import {
   createRateLimiter,
   ipInNets,
   ipKey,
+  isRetryLater,
   MAX_PLAN,
   trustedProxies,
   PLAN_KIND,
@@ -28,6 +29,8 @@ import {
 const A = "kaspa:q" + "qpzry9x8gf2tvdw0s3jn54khce6mua7l".repeat(2).slice(0, 60);
 const T = "kaspatest:q" + "qpzry9x8gf2tvdw0s3jn54khce6mua7l".repeat(2).slice(0, 60);
 const X = "ab".repeat(32);
+/** zweite Schnorr-Adresse (Empfänger eines Tresors) */
+const A2 = "kaspa:q" + "pzry9x8gf2tvdw0s3jn54khce6mua7lq".repeat(2).slice(0, 60);
 
 const plan = (extra: Record<string, unknown> = {}) => ({ kind: PLAN_KIND, network: "mainnet", address: A, action: { action: "mint", vault: 0, ghost: 1 }, ...extra });
 
@@ -59,6 +62,9 @@ describe("wallet build: Argumente", () => {
       swap: { kas: "10", min: "0.3" },
       "pool-add": { kas: "10", ghost: "0.4", minShares: "1000" },
       "pool-remove": { percent: "50", minKas: "0", minGhost: "0.1" },
+      "tresor-open": { to: A2, amount: "10", interval: "monthly", start: "2027-02-01", count: 3 },
+      "tresor-topup": { tresor: X, kas: "5" },
+      "tresor-cancel": { tresor: X },
     };
     expect(Object.keys(ex).sort()).toEqual([...WALLET_ACTIONS].sort());
     for (const a of WALLET_ACTIONS) {
@@ -96,7 +102,10 @@ describe("wallet build: Argumente", () => {
   });
 
   it("jede Aktion kennt nur ihre Parameter", () => {
-    for (const a of WALLET_ACTIONS) for (const k of WALLET_PARAMS[a]) expect(["vault", "kas", "ghost", "keep", "to", "message", "onchain", "min", "minShares", "percent", "minKas", "minGhost"]).toContain(k);
+    const ghost = ["vault", "kas", "ghost", "keep", "to", "message", "onchain", "min", "minShares", "percent", "minKas", "minGhost"];
+    // Tresore: eigene, ebenso feste Liste (nie key, id oder Pfade)
+    const tresor = ["to", "amount", "interval", "start", "count", "fund", "maxFee", "message", "tresor", "kas"];
+    for (const a of WALLET_ACTIONS) for (const k of WALLET_PARAMS[a]) expect(a.startsWith("tresor-") ? tresor : ghost).toContain(k);
   });
 });
 
@@ -480,5 +489,31 @@ describe("buildWalletReceiveArgs (öffentliche GHOST-Suche)", () => {
     expect(() => buildWalletReceiveArgs({ network: "mainnet", address: A, ghost: "1", key: "keys/x.json" })).toThrow(ValidationError);
     expect(() => buildWalletReceiveArgs({ network: "testnet-10", address: A, ghost: "1" })).toThrow(ValidationError);
     expect(() => buildWalletReceiveArgs({ network: "mainnet", address: A, ghost: "-1" })).toThrow(ValidationError);
+  });
+});
+
+// ------------------------------------------------------------ Audit 19 ----
+
+describe("Audit 19 A19-7: belegte Tresor-Sperre heißt „gleich erneut“", () => {
+  const BUSY = "Gerade läuft eine Zahlungsrunde für Tresore. Bitte in ein bis zwei Minuten erneut senden – es wurde nichts gesendet, deine Signatur bleibt gültig.";
+
+  it("erkennt die Meldungen von ghostctl, bei denen sicher nichts gesendet wurde", () => {
+    expect(isRetryLater(BUSY)).toBe(true);
+    expect(isRetryLater("Eine andere ghostctl-Instanz arbeitet gerade (Sperre mainnet.lock). Bitte gleich noch einmal versuchen.")).toBe(true);
+    expect(isRetryLater("Die letzte Transaktion (Tresor 1a2b3c4d: 1 KAS, ab) ist noch unterwegs. Bitte kurz warten.")).toBe(true);
+    expect(isRetryLater("Plan passt nicht zum aktuellen Stand – nicht gesendet")).toBe(false);
+    expect(isRetryLater(undefined)).toBe(false);
+  });
+
+  it("der Plan wird nicht gesperrt, die Antwort trägt busy", async () => {
+    const dir = stub(`echo '{"ok":false,"error":"${BUSY}","transactions":[]}'; exit 1`);
+    const port = await start(dir);
+    const first = await request(port, "/api/wallet/submit", SEND);
+    expect(first.status).toBe(200);
+    expect(JSON.parse(first.body)).toMatchObject({ ok: false, busy: true });
+    const again = await request(port, "/api/wallet/submit", SEND);
+    expect(again.status).toBe(200);
+    expect(JSON.parse(again.body)).toMatchObject({ ok: false, busy: true });
+    expect(readFileSync(path.join(dir, "calls.txt"), "utf8").trim().split("\n")).toHaveLength(2);
   });
 });

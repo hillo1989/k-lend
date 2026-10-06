@@ -38,12 +38,12 @@ use crate::chain::Shape;
 use crate::contracts::*;
 use crate::ops::{Funds, Tracked, genesis_output, p2pk_spk, track};
 use crate::standing;
-use crate::txb::{Built, Draft, FEE_MARGIN_PERMILLE, In, MIN_CHANGE, Unlock, build_with_payload, min_fee};
+use crate::txb::{Built, Draft, FEE_MARGIN_PERMILLE, In, MIN_CHANGE, Signer, Unlock, build_with_payload, min_fee};
 use kaspa_consensus_core::Hash;
 use kaspa_consensus_core::config::params::Params;
 use kaspa_consensus_core::constants::LOCK_TIME_THRESHOLD;
 use kaspa_consensus_core::tx::{CovenantBinding, ScriptPublicKey, TransactionOutpoint, TransactionOutput, UtxoEntry};
-use secp256k1::{Keypair, SecretKey};
+use secp256k1::SecretKey;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -103,6 +103,43 @@ pub const RETRY_AFTER_ERROR_MS: i64 = 15 * 60_000;
 pub const CODE_PREFIX: &str = "ghost-tresor:2:";
 /// Präfix der alten Codes (Vertrag ohne gebundene Nachricht)
 pub const OLD_CODE_PREFIX: &str = "ghost-tresor:1:";
+/// Über die Browser-Wallet (öffentliche Seite) höchstens so viele laufende
+/// Tresore je Besitzer in der Tresor-Datei des Servers (wallet_ops). Audit 19
+/// A19-3: vorher 20. Zehn reichen für Miete, Abos und Sparpläne einer Person;
+/// wer die Datei füllen will, braucht so mindestens 100 Adressen.
+pub const MAX_WALLET_PER_OWNER: usize = 10;
+/// Höchstzahl der Tresore in der Tresor-Datei, die den Agenten bald etwas
+/// kosten (`TresorRec::busy`: laufend, zahlbar, innerhalb BUSY_HORIZON_MS
+/// fällig); ab hier lehnt ein Anlegen über die Browser-Wallet ab. Ab dieser
+/// Zahl von Einträgen fallen außerdem beendete Wallet-Tresore heraus.
+/// Jeder belegte Platz kostet den Agenten Abfragen am Node und eine Sendung,
+/// sobald er fällig ist; die Datei soll sich nicht beliebig füllen lassen.
+pub const MAX_FILE_TRESORE: usize = 1_000;
+/// Belegt zählt ein Tresor nur, wenn sein nächster Termin höchstens so weit
+/// voraus liegt (A19-3). 32 Tage: monatliche Tresore zählen immer, jährliche
+/// nur im Monat vor dem Termin. Tresore mit Termin 2199 belegten vorher
+/// dauerhaft einen Platz, ohne je fällig zu werden. Wer die 1 000 Plätze
+/// sperren will, muss jetzt 1 000 Tresore mit je mindestens Betrag +
+/// Höchstgebühr + 1 KAS (≈ 2 KAS) bereithalten, die jeden Monat zahlen –
+/// an wen auch immer, aber jede Zahlung kostet ihn die Netzgebühr und
+/// danach ein Auffüllen, sonst ist der Tresor leer und zählt nicht mehr.
+pub const BUSY_HORIZON_MS: i64 = 32 * standing::DAY_MS;
+/// Höchstzahl aller Einträge (auch ruhende und leere), gegen eine Datei, die
+/// beim Laden jeder Runde Megabytes groß wird: 3 000 Einträge mit kurzem
+/// Verlauf sind etwa 6 MB. Ruhende Wallet-Tresore nach dem Muster aus A19-3
+/// zu füllen, kostet so mindestens 3 000 × 2 KAS ≈ 6 000 KAS gebunden und
+/// 300 Adressen (MAX_WALLET_PER_OWNER).
+pub const MAX_FILE_ALL: usize = 3_000;
+/// Erster Termin eines Wallet-Tresors höchstens so weit nach der Past Median
+/// Time (A19-1/A19-3). Ein Jahr deckt jährliche Zahlungen ab; ein Termin
+/// 2199 hält keinen Platz mehr bis dahin fest.
+pub const MAX_FIRST_DUE_AHEAD_MS: i64 = 366 * standing::DAY_MS;
+/// Suche am Node für die öffentliche Seite (Auffüllen und Kündigen über die
+/// Browser-Wallet, A19-2): höchstens so viele Zustände ab dem bekannten. Der
+/// Agent führt die Datei bei jeder fälligen Zahlung nach; mehr als 64
+/// Zahlungen, die ein anderer ausgelöst hat, ohne dass der Agent sie sah,
+/// kommen praktisch nicht vor. Vorher bis MAX_FOLLOW (2 000) je Anfrage.
+pub const PUBLIC_FOLLOW: usize = 64;
 
 // ------------------------------------------------------------ Terminlogik ----
 
@@ -155,6 +192,29 @@ pub fn check_params(p: &TresorParams, first: &TresorState) -> Result<(), String>
     Ok(())
 }
 
+/// Erster Termin beim Anlegen (`tresor open`, Wallet): nicht mehr als einen
+/// Tag vor der Past Median Time `pmt`. Der Vertrag selbst erlaubt Termine ab
+/// 1985; ein alter Termin mit kurzem Intervall wäre ein Rückstand, den der
+/// Agent Runde für Runde nachzahlt (A19-1).
+pub fn check_first_due(first: i64, pmt: i64) -> Result<(), String> {
+    if first < pmt - standing::DAY_MS {
+        return Err(format!("Erster Termin {} liegt in der Vergangenheit", fmt_time(first)));
+    }
+    Ok(())
+}
+
+/// Erster Termin eines Wallet-Tresors: nicht in der Vergangenheit und
+/// höchstens MAX_FIRST_DUE_AHEAD_MS voraus. Gilt in `wallet_ops::run_tresor`,
+/// also für build UND den Neubau in submit – die Aktion stammt dort aus dem
+/// Plan des Browsers (Audit 19 A19-1).
+pub fn check_wallet_first_due(first: i64, pmt: i64) -> Result<(), String> {
+    check_first_due(first, pmt)?;
+    if first > pmt + MAX_FIRST_DUE_AHEAD_MS {
+        return Err(format!("Erster Termin {}: höchstens ein Jahr im Voraus", fmt_time(first)));
+    }
+    Ok(())
+}
+
 /// Startguthaben-Vorschlag: n × (Betrag + Höchstgebühr) + Reserve; bei
 /// unbegrenzt None (frei wählbar)
 pub fn suggested_fund(p: &TresorParams, left: i64) -> Option<i64> {
@@ -198,6 +258,18 @@ pub fn due_now(p: &TresorParams, t: &Tracked<TresorState>, pmt_ms: i64, with_key
         ));
     }
     Ok(())
+}
+
+/// Intervall als Text: „monatlich am 1.“, „wöchentlich“, „alle 14 Tage“ …
+pub fn interval_text(p: &TresorParams) -> String {
+    let day = standing::DAY_MS;
+    match (p.anchor_day, p.period_ms) {
+        (d, _) if d > 0 => format!("monatlich am {d}."),
+        (_, x) if x == day => "täglich".into(),
+        (_, x) if x == 7 * day => "wöchentlich".into(),
+        (_, x) if x % day == 0 => format!("alle {} Tage", x / day),
+        (_, x) => format!("alle {} min", x / 60_000),
+    }
 }
 
 /// Unix-ms → "2027-01-01 08:00 UTC"
@@ -560,12 +632,14 @@ pub async fn locate_io(io: &mut impl TresorIo, p: &TresorParams, t: &Tracked<Tre
 
 // ----------------------------------------------------------- Transaktionen ----
 
-pub(crate) fn tresor_input(p: &TresorParams, t: &Tracked<TresorState>, entry: &'static str, signer: Option<Keypair>) -> In {
+/// Tresor-Eingang; `signer` = Besitzer bei `topUp` und `cancel` (Schlüssel
+/// oder Browser-Wallet), bei `pay` keiner
+pub(crate) fn tresor_input(p: &TresorParams, t: &Tracked<TresorState>, entry: &'static str, signer: Option<Signer>) -> In {
     let art = standing_order(p, &t.state);
     In {
         outpoint: t.outpoint,
         entry: UtxoEntry::new(t.value, spk(&art), 0, false, Some(t.cov)),
-        unlock: Unlock::Entry { art, entry, args: vec![], sig_at: signer.map(|k| (0, k.into())) },
+        unlock: Unlock::Entry { art, entry, args: vec![], sig_at: signer.map(|k| (0, k)) },
     }
 }
 
@@ -574,8 +648,12 @@ pub(crate) fn cont(p: &TresorParams, s: &TresorState, value: u64, cov: Hash) -> 
 }
 
 /// Baut zweimal: erst mit `probe` sompi Gebühr, dann genau mit der nötigen
-/// (die Gebühr hängt nicht von den Beträgen ab, nur von der Größe)
+/// (die Gebühr hängt nicht von den Beträgen ab, nur von der Größe). Mit
+/// Browser-Wallet (wallet_ops) genau einmal, mit der Gebühr der Messkopie.
 pub(crate) fn build_exact_fee(mk: impl Fn(u64) -> Draft, probe: u64, payload: &[u8], net: &Params) -> Result<Built, String> {
+    if let Some(fee) = crate::txb::wallet_fill_fee() {
+        return build_with_payload(mk(fee), payload, net);
+    }
     let b1 = build_with_payload(mk(probe), payload, net)?;
     // Mindestgebühr der fertigen Tx (mit endgültigen Budgets) plus Aufschlag wie txb::build
     let need = min_fee(b1.compute_mass, b1.transient_mass) * (1000 + FEE_MARGIN_PERMILLE) / 1000;
@@ -679,29 +757,33 @@ pub fn pay(p: &TresorParams, t: &Tracked<TresorState>, payload: &[u8], funds: Op
     Ok(Paid { built: b, next, fee_from_tresor: false })
 }
 
-/// Absender legt `add` sompi nach (Termine bleiben)
-pub fn topup(p: &TresorParams, t: &Tracked<TresorState>, owner: &Keypair, add: u64, funds: &Funds, net: &Params) -> Result<(Built, Tracked<TresorState>), String> {
-    if crate::ops::xonly(owner) != p.owner {
+/// Absender legt `add` sompi nach (Termine bleiben). `owner` = Schlüssel des
+/// Absenders oder seine Browser-Wallet (wallet_ops)
+pub fn topup(p: &TresorParams, t: &Tracked<TresorState>, owner: impl Into<Signer>, add: u64, funds: &Funds, net: &Params) -> Result<(Built, Tracked<TresorState>), String> {
+    let owner: Signer = owner.into();
+    if owner.xonly() != p.owner {
         return Err("Auffüllen darf nur der Absender dieses Tresors".into());
     }
     if add == 0 {
         return Err("Betrag zum Auffüllen muss größer als 0 sein".into());
     }
-    let mut inputs = vec![tresor_input(p, t, "topUp", Some(*owner))];
+    let mut inputs = vec![tresor_input(p, t, "topUp", Some(owner))];
     inputs.extend(funds.utxos.iter().map(|(op, e)| In { outpoint: *op, entry: e.clone(), unlock: Unlock::P2pk { signer: funds.key } }));
     let b = crate::txb::build(Draft { inputs, outputs: vec![cont(p, &t.state, t.value + add, t.cov)], change_spk: p2pk_spk(&funds.key.xonly()), lock_time: 0 }, net)?;
     let next = track(&b, 0, t.cov, t.state);
     Ok((b, next))
 }
 
-/// Absender kündigt: alles (abzüglich Gebühr) an den Absender, der Tresor endet
-pub fn cancel(p: &TresorParams, t: &Tracked<TresorState>, owner: &Keypair, net: &Params) -> Result<Built, String> {
-    if crate::ops::xonly(owner) != p.owner {
+/// Absender kündigt: alles (abzüglich Gebühr) an den Absender, der Tresor
+/// endet. `owner` = Schlüssel des Absenders oder seine Browser-Wallet
+pub fn cancel(p: &TresorParams, t: &Tracked<TresorState>, owner: impl Into<Signer>, net: &Params) -> Result<Built, String> {
+    let owner: Signer = owner.into();
+    if owner.xonly() != p.owner {
         return Err("Kündigen darf nur der Absender dieses Tresors".into());
     }
     let to = p2pk_spk(&p.owner);
     let mk = |fee: u64| Draft {
-        inputs: vec![tresor_input(p, t, "cancel", Some(*owner))],
+        inputs: vec![tresor_input(p, t, "cancel", Some(owner))],
         outputs: vec![TransactionOutput { value: t.value - fee, script_public_key: to.clone(), covenant: None }],
         change_spk: to.clone(),
         lock_time: 0,
@@ -1014,6 +1096,17 @@ pub struct TresorRec {
     pub retry_after: Option<i64>,
     #[serde(default)]
     pub history: Vec<TresorHist>,
+    /// Über die Browser-Wallet angelegt (öffentliche Seite, wallet_ops): Die
+    /// Netzgebühr jeder Zahlung kommt nur aus dem Tresor (Höchstgebühr); ein
+    /// Agent zahlt sie nie mit dem eigenen Schlüssel dazu, sonst ließe sich
+    /// sein Guthaben über fremde Tresore mit knappem Rest aufbrauchen.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wallet: bool,
+    /// Letzte Zahlung durch diese Automatik (Unix-ms, Uhr des Rechners): die
+    /// Runde bedient fällige Tresore reihum, am längsten nicht bediente zuerst
+    /// (Audit 19 A19-1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_paid_ms: Option<i64>,
 }
 
 impl TresorRec {
@@ -1034,6 +1127,8 @@ impl TresorRec {
             last_error: None,
             retry_after: None,
             history: vec![],
+            wallet: false,
+            last_paid_ms: None,
         }
     }
     pub fn push(&mut self, h: TresorHist) {
@@ -1094,9 +1189,16 @@ impl TresorRec {
             && self.missing_ms.is_none_or(|t| now_ms - t <= MISSING_RECHECK_FOR_MS)
             && self.retry_after.is_none_or(|t| t <= now_ms)
     }
+    /// Darf ein Auslöser mit eigenem Schlüssel (`with_key`) bei diesem Tresor
+    /// die Gebühr zahlen? Bei Wallet-Tresoren nie (`wallet`).
+    pub fn key_may_pay(&self, with_key: bool) -> bool {
+        with_key && !self.wallet
+    }
     /// Offline-Schätzung mit der Uhr des Rechners: lohnt ein Abgleich mit dem
-    /// Node? `with_key`: der Auslöser könnte die Gebühr selbst zahlen.
+    /// Node? `with_key`: der Auslöser könnte die Gebühr selbst zahlen (nicht
+    /// bei Wallet-Tresoren, `key_may_pay`).
     pub fn looks_due(&self, now_ms: i64, with_key: bool) -> bool {
+        let with_key = self.key_may_pay(with_key);
         if self.missing.is_some() {
             return self.recheck_missing(now_ms);
         }
@@ -1105,6 +1207,27 @@ impl TresorRec {
             && self.utxo.state.next_due + PMT_LAG_MS <= now_ms
             && payable(&self.params, self.utxo.value, with_key)
             && self.retry_after.is_none_or(|t| t <= now_ms)
+    }
+}
+
+impl TresorRec {
+    /// Belegt der Tresor einen Platz der Datei (MAX_FILE_TRESORE)? Nur, wenn
+    /// er den Agenten bald Abfragen und eine Sendung kostet: läuft, hat noch
+    /// Zahlungen, trägt die nächste und ist innerhalb BUSY_HORIZON_MS fällig
+    /// (A19-3). Leere, erledigte und weit entfernte Tresore ruhen.
+    pub fn busy(&self, now_ms: i64) -> bool {
+        self.active()
+            && self.utxo.state.left != 0
+            && payable(&self.params, self.utxo.value, self.key_may_pay(true))
+            && self.utxo.state.next_due <= now_ms + BUSY_HORIZON_MS
+    }
+    /// Darf ein Wallet-Tresor aus der vollen Datei fallen? Nur, wenn er
+    /// gekündigt ist oder seit über MISSING_RECHECK_FOR_MS am Node fehlt (die
+    /// Automatik hat ihn dann eine Woche lang stündlich gesucht). Laufende
+    /// mit Guthaben nie: ohne Eintrag könnte der Besitzer über die Seite
+    /// nicht mehr kündigen.
+    fn evictable(&self, now_ms: i64) -> bool {
+        self.wallet && (self.ended.is_some() || (self.missing.is_some() && self.missing_ms.is_some_and(|t| now_ms - t > MISSING_RECHECK_FOR_MS)))
     }
 }
 
@@ -1133,7 +1256,12 @@ impl TresorFile {
         match hits.as_slice() {
             [i] => Ok(*i),
             [] => Err(format!("Tresor {id} nicht gefunden")),
-            _ => Err(format!("Tresor {id} ist mehrdeutig – bitte die volle Covenant-ID angeben")),
+            // A19-9: die Kurz-ID lässt sich mit ~2^32 Versuchen treffen; die
+            // vollen IDs nennen, damit der Betreiber gleich weiterkommt
+            many => Err(format!(
+                "Tresor {id} ist mehrdeutig – bitte die volle Covenant-ID angeben: {}",
+                many.iter().map(|&i| self.tresore[i].utxo.cov.to_string()).collect::<Vec<_>>().join(", ")
+            )),
         }
     }
     /// Übernehmen oder (gleiche Covenant-ID) aktualisieren
@@ -1170,6 +1298,38 @@ impl TresorFile {
                 self.tresore.len() - 1
             }
         }
+    }
+}
+
+impl TresorFile {
+    /// Tresore eines Besitzers (x-only), in der Reihenfolge der Datei
+    pub fn of_owner<'a>(&'a self, owner: &'a [u8]) -> impl Iterator<Item = &'a TresorRec> + 'a {
+        self.tresore.iter().filter(move |r| r.params.owner == owner)
+    }
+    /// Platz für einen neuen Wallet-Tresor von `owner` (Grenzen gegen eine
+    /// mit Einträgen gefüllte Datei, A19-3): höchstens MAX_WALLET_PER_OWNER
+    /// laufende je Besitzer; ab MAX_FILE_TRESORE Einträgen fallen zuerst
+    /// beendete Wallet-Tresore heraus (älteste zuerst, `evictable`); danach
+    /// abgelehnt, wenn MAX_FILE_TRESORE Tresore belegt sind (`busy`, `now_ms`
+    /// = Past Median Time) oder die Datei MAX_FILE_ALL Einträge hat.
+    pub fn make_room_for_wallet(&mut self, owner: &[u8], now_ms: i64) -> Result<(), String> {
+        let running = self.of_owner(owner).filter(|r| r.ended.is_none()).count();
+        if running >= MAX_WALLET_PER_OWNER {
+            return Err(format!("Diese Adresse hat schon {running} laufende Tresore (höchstens {MAX_WALLET_PER_OWNER}); bitte erst einen kündigen"));
+        }
+        while self.tresore.len() >= MAX_FILE_TRESORE {
+            match self.tresore.iter().position(|r| r.evictable(now_ms)) {
+                Some(i) => {
+                    self.tresore.remove(i);
+                }
+                None => break,
+            }
+        }
+        let busy = self.tresore.iter().filter(|r| r.busy(now_ms)).count();
+        if busy >= MAX_FILE_TRESORE || self.tresore.len() >= MAX_FILE_ALL {
+            return Err("Auf diesem Server ist gerade kein Platz für weitere Tresore – bitte später erneut versuchen".into());
+        }
+        Ok(())
     }
 }
 
@@ -1245,6 +1405,9 @@ pub trait TresorIo {
 pub enum Search {
     Full,
     Auto,
+    /// Öffentliche Seite (Auffüllen, Kündigen über die Browser-Wallet):
+    /// höchstens PUBLIC_FOLLOW Zustände (A19-2)
+    Public,
 }
 
 /// Tresor über `io` nachführen. Liefert einen Hinweis, wenn sich etwas geändert
@@ -1254,7 +1417,11 @@ pub async fn follow(io: &mut impl TresorIo, r: &mut TresorRec, pmt: i64, now: &s
     if r.ended.is_some() {
         return Ok(None);
     }
-    let max = if search == Search::Auto && r.missing.is_some() { MISSING_RECHECK_FOLLOW } else { MAX_FOLLOW };
+    let max = match search {
+        Search::Auto if r.missing.is_some() => MISSING_RECHECK_FOLLOW,
+        Search::Public => PUBLIC_FOLLOW,
+        _ => MAX_FOLLOW,
+    };
     match locate_io(io, &r.params, &r.utxo, pmt, max).await? {
         Some(t) => {
             let paid = candidates(&r.params, &r.utxo.state, pmt).iter().position(|s| *s == t.state).unwrap_or(0);
@@ -1361,13 +1528,29 @@ pub struct TresorReport {
 /// (A12-16). `with_key`: der Auslöser darf die Gebühr mit eigenem Schlüssel
 /// zahlen. Nach einem Sendefehler geht die Runde weiter, außer das Journal ist
 /// noch offen oder der Nutzer hat abgebrochen.
+///
+/// Reihenfolge (Audit 19 A19-1): Je Tresor und Runde höchstens ein Termin.
+/// Offline fällige Tresore kommen zuerst, und zwar reihum – der am längsten
+/// nicht bediente zuerst (`last_paid_ms`), danach die übrigen in
+/// Dateireihenfolge. Ein Tresor mit großem Rückstand kann so die Sendezeit
+/// einer Runde (Agent: 90 s nach der ersten Sendung) nicht Runde für Runde
+/// für sich allein verbrauchen; vorher kam immer der erste der Datei zuerst.
+/// Was das Nachführen am Node herausfindet (vor allem `missing` nach der
+/// teuren ersten Suche), wird sofort gespeichert und geht nicht verloren,
+/// wenn das Zeitlimit die Runde vor dem Ende abbricht (A19-2).
 pub async fn pay_round(io: &mut impl TresorIo, file: &mut TresorFile, id: Option<&str>, with_key: bool, pmt: i64, now: &str, net: &Params) -> Result<Vec<TresorReport>, String> {
     let single = id.is_some();
     let idxs: Vec<usize> = match id {
         Some(i) => vec![file.find(i)?],
         None => {
             let now_ms = io.now_ms();
-            (0..file.tresore.len()).filter(|&i| file.tresore[i].active() || file.tresore[i].recheck_missing(now_ms)).collect()
+            let mut v: Vec<usize> = (0..file.tresore.len()).filter(|&i| file.tresore[i].active() || file.tresore[i].recheck_missing(now_ms)).collect();
+            // stabil: bei Gleichstand bleibt die Dateireihenfolge
+            v.sort_by_key(|&i| {
+                let r = &file.tresore[i];
+                if r.missing.is_none() && r.looks_due(now_ms, with_key) { (0, r.last_paid_ms.unwrap_or(i64::MIN)) } else { (1, 0) }
+            });
+            v
         }
     };
     let search = if single { Search::Full } else { Search::Auto };
@@ -1376,6 +1559,9 @@ pub async fn pay_round(io: &mut impl TresorIo, file: &mut TresorFile, id: Option
         let note = follow(io, &mut file.tresore[i], pmt, now, search).await?;
         if let Some(n) = &note {
             io.say(n);
+            // gleich sichern (A19-2): die Suche bis MAX_FOLLOW soll sich nach
+            // einem Abbruch der Runde nicht wiederholen
+            io.save(file)?;
         }
         let r = file.tresore[i].clone();
         let rep = |ok: bool, paid: bool, text: String, txid: Option<String>| TresorReport { id: r.id.clone(), ok, paid, text, txid };
@@ -1390,6 +1576,8 @@ pub async fn pay_round(io: &mut impl TresorIo, file: &mut TresorFile, id: Option
             }
             continue;
         }
+        // Wallet-Tresore zahlen die Gebühr nur selbst (TresorRec::wallet)
+        let with_key = r.key_may_pay(with_key);
         if let Err(why) = due_now(&r.params, &r.utxo, pmt, with_key) {
             if single {
                 io.save(file)?;
@@ -1422,6 +1610,7 @@ pub async fn pay_round(io: &mut impl TresorIo, file: &mut TresorFile, id: Option
             nr.utxo = paid.next.clone();
             nr.last_error = None;
             nr.retry_after = None;
+            nr.last_paid_ms = Some(io.now_ms());
             nr.push(TresorHist {
                 at: now.into(),
                 action: "pay".into(),
@@ -1493,7 +1682,7 @@ mod tests {
 
     fn x(n: u8) -> Vec<u8> {
         let secp = secp256k1::Secp256k1::new();
-        let k = Keypair::from_secret_key(&secp, &secp256k1::SecretKey::from_slice(&[n; 32]).unwrap());
+        let k = secp256k1::Keypair::from_secret_key(&secp, &secp256k1::SecretKey::from_slice(&[n; 32]).unwrap());
         crate::ops::xonly(&k)
     }
 

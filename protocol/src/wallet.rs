@@ -535,7 +535,7 @@ fn cancel_plan(stage: &str, network: &str, prefix: Prefix, probe: Probe, entry_r
     pm.owner = mirror_x_of(&mirror);
     let to = p2pk_spk(&p.owner);
     let mk = |fee: u64| Draft {
-        inputs: vec![tresor::tresor_input(&pm, &t, "cancel", Some(mirror))],
+        inputs: vec![tresor::tresor_input(&pm, &t, "cancel", Some(mirror.into()))],
         outputs: vec![TransactionOutput { value: t.value - fee, script_public_key: to.clone(), covenant: None }],
         change_spk: to.clone(),
         lock_time: 0,

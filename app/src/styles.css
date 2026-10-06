@@ -1925,6 +1925,26 @@ fieldset.plain:disabled {
   flex: 1 1 140px;
   max-width: 220px;
 }
+/* Tresor mit Browser-Wallet: Auffüllen/Kündigen unter dem Eintrag */
+.tresor-panel {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  display: grid;
+  gap: 10px;
+}
+@media (max-width: 720px) {
+  .tresor-panel .btn-row .btn,
+  .abo-item .btn-row.tight .btn {
+    flex: 1 1 auto;
+  }
+  .abo-item {
+    padding: 10px;
+  }
+  .abo-item .kv div {
+    flex-wrap: wrap;
+  }
+}
 
 /* ---------- Handy (bis 720 px): kompakt, fingerfreundlich, kein iOS-Zoom ---------- */
 .kv dt {

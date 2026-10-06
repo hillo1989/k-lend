@@ -132,6 +132,9 @@ pub struct WalletFill {
     pub budgets: Vec<u16>,
     pub fee: u64,
     pub sigs: Vec<Option<Vec<u8>>>,
+    /// Gebühr samt verschenktem Rest, wie die Messkopie sie gezahlt hat: für
+    /// Bauten, die die Gebühr selbst in einen Ausgang rechnen (`wallet_fill_fee`)
+    pub paid: u64,
 }
 
 /// Was ein Bau mit Wallet-Signierern zurückmeldet
@@ -154,6 +157,15 @@ pub fn with_wallet_fill<R>(fill: WalletFill, op: impl FnOnce() -> R) -> (R, Wall
     let r = op();
     let wb = WALLET_FILL.with(|c| c.borrow_mut().take()).map(|(_, w)| w).unwrap_or_default();
     (r, wb)
+}
+
+/// Gezahlte Gebühr der Messkopie aus den Wallet-Vorgaben, solange ein Bau mit
+/// `with_wallet_fill` läuft und noch nicht gebaut hat. Für Bauten, die die
+/// Gebühr selbst in einen Ausgang rechnen (tresor::cancel über
+/// `build_exact_fee`): mit Wallet wird genau einmal gebaut, mit derselben
+/// Gebühr im Ausgang wie in der Messkopie.
+pub fn wallet_fill_fee() -> Option<u64> {
+    WALLET_FILL.with(|c| c.borrow().as_ref().and_then(|(f, w)| (!w.used).then_some(f.paid)))
 }
 
 /// Platzhalter für eine fehlende Wallet-Signatur (Länge wie Schnorr + Hashtype)

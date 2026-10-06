@@ -180,7 +180,9 @@ export function ActionForms({
       const t = toMode === "key" && signMode === "key" ? toKey : toFree.trim();
       if (!t) return { params: null, problem: tr("Empfänger angeben.", "Enter a recipient.") };
       if (isKName(t)) {
-        if (!kname || kname.input !== t || kname.loading) return { params: null, problem: tr(`${t} wird geprüft …`, `Checking ${t} …`) };
+        // Neuprüfung alle 60 s: die bisherige Adresse gilt weiter, bis eine neue Antwort da ist –
+        // sonst verwirft der Signierablauf Plan und Signatur (Audit 19 A19-5)
+        if (!kname || kname.input !== t || (kname.loading && !kname.address)) return { params: null, problem: tr(`${t} wird geprüft …`, `Checking ${t} …`) };
         if (!kname.address) return { params: null, problem: kname.error ?? tr("Name nicht auflösbar.", "Name cannot be resolved.") };
         p.to = kname.address;
       } else p.to = t;

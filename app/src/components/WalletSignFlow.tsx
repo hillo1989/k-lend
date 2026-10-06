@@ -2,7 +2,7 @@
 // Wallet signieren → prüfen → senden. Logik in src/wallet/actions.ts.
 import { useEffect, useState } from "react";
 import type { NetworkId } from "../config";
-import type { ActionParams, CliAction } from "../lib/commands";
+import type { ActionParams } from "../lib/commands";
 import { markBusy } from "../lib/busy";
 import { de } from "../lib/status";
 import { logTx } from "../lib/txlog";
@@ -13,6 +13,7 @@ import {
   callWalletApi,
   canSendSigned,
   foreignOutputs,
+  keepSigned,
   planProblem,
   reportLines,
   sendOutcome,
@@ -22,6 +23,7 @@ import {
   type BuildResult,
   type Fetch,
   type SubmitResult,
+  type WalletActionName,
 } from "../wallet/actions";
 import { WALLET_NAMES } from "../wallet/providers";
 import { useWallet } from "../wallet/WalletContext";
@@ -84,7 +86,7 @@ export function WalletSignFlow({
   onDone,
 }: {
   network: NetworkId;
-  action: CliAction;
+  action: WalletActionName;
   label: string;
   /** Parameter für /api/wallet/build (ohne Schlüssel) oder null */
   params: ActionParams | null;
@@ -166,7 +168,8 @@ export function WalletSignFlow({
     try {
       const r = (await callWalletApi(fetchFn, "submit", submitBody(network, plan.b.plan, checked.signed, true), true)) as unknown as SubmitResult;
       setSent(r);
-      setChecked(null);
+      // „gleich erneut“ (Sperre belegt, A19-7): nichts gesendet, Signatur behalten
+      if (!keepSigned(r)) setChecked(null);
       if (r.ok && r.sent) {
         setPlan(null);
         logTx({ at: Date.now(), network, key: `wallet:${address}`, action, label, amount: null, unit: null, to: typeof params?.to === "string" ? params.to : null, txids: r.txid ? [r.txid] : [] });

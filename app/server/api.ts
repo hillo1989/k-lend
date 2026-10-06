@@ -18,6 +18,7 @@
 //   POST /api/wallet/submit      Wallet-Antwort prüfen, auf Wunsch senden (ghostctl wallet submit)
 //   POST /api/wallet/receive     eingegangene GHOST für eine Wallet-Adresse suchen (sendet nichts)
 //   GET  /api/wallet/name        .k-Name (dotk.name) → Adresse, am eigenen Node geprüft
+//   GET  /api/wallet/tresore     Tresore eines Besitzers (ghostctl tresor owned, nur lesend)
 //
 // Daueraufträge: Solange der Server läuft, stößt er jede Minute
 // `ghostctl abo run --ja` an, aber nur wenn laut deployments/<netz>-abos.json
@@ -68,7 +69,7 @@ import {
 import { historyCache, parseDays } from "./history.ts";
 import { resolveName } from "./dotkNames.ts";
 import { buildWalletProbeCall, PROBE_BODY_LIMIT } from "./walletProbe.ts";
-import { buildWalletBuildArgs, buildWalletReceiveArgs, buildWalletSubmitCall, clientKey, createRateLimiter, LOOPBACK_PROXIES, WALLET_BODY_LIMIT } from "./walletActions.ts";
+import { buildWalletBuildArgs, buildWalletReceiveArgs, buildWalletSubmitCall, buildWalletTresoreArgs, clientKey, createRateLimiter, isRetryLater, LOOPBACK_PROXIES, WALLET_BODY_LIMIT } from "./walletActions.ts";
 
 /** ghostctl meldet in `transactions` gesendete (sent) oder unklare (unclear) Tx */
 function sentOrUnclear(txs: unknown): boolean {
@@ -611,6 +612,22 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
           }
         }
 
+        case "GET /api/wallet/tresore": {
+          // „Meine Tresore“ (Browser-Wallet): liest nur die Tresor-Datei; gleiche
+          // Ratenbegrenzung und gleiche ghostctl-Plätze wie build/submit
+          const wait = walletLimiter.take(clientKey(req.socket.remoteAddress, h["x-forwarded-for"], trusted));
+          if (wait !== null) {
+            res.setHeader("Retry-After", String(wait));
+            return send(res, 429, { ok: false, error: `Zu viele Anfragen – bitte in ${wait} s erneut versuchen.` });
+          }
+          const args = buildWalletTresoreArgs(url.searchParams.get("network") ?? undefined, url.searchParams.get("owner"));
+          const r = await runWallet(args, readTimeout);
+          if (r.timedOut) return send(res, 200, { ok: false, timeout: true, error: "Zeitüberschreitung." });
+          const j = parseJson(r.stdout);
+          if (!j) return send(res, 200, { ok: false, error: `ghostctl tresor owned: ${tail(r.stderr) || "keine Ausgabe"}` });
+          return send(res, 200, j);
+        }
+
         case "POST /api/wallet/build":
         case "POST /api/wallet/submit": {
           const wait = walletLimiter.take(clientKey(req.socket.remoteAddress, h["x-forwarded-for"], trusted));
@@ -682,6 +699,8 @@ export function createGhostApi(projectDir: string, opts: GhostApiOptions = {}) {
             }
             // Fehler NACH dem Senden (Tx ging hinaus bzw. Journal steht noch): unklar, nicht „nicht gesendet“
             if (call.sends && j.ok === false && sentOrUnclear(j.transactions)) return send(res, 200, { ...j, unclear: true });
+            // Sperre belegt bzw. Journal gleich geklärt (A19-7): nichts gesendet, Plan nicht sperren, gleich erneut
+            if (j.ok === false && isRetryLater(j.error)) return send(res, 200, { ...j, busy: true });
             // endgültig abgewiesen (nicht Node-Ausfall): Plan einige Minuten sperren (G-3)
             if (j.ok === false && !(typeof j.error === "string" && isNodeError(j.error))) {
               rejectedPlans.set(key, Date.now() + REJECT_MS);

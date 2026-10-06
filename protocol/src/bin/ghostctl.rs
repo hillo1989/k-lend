@@ -492,6 +492,13 @@ enum TresorCmd {
     },
     /// Tresor-Code für den Empfänger ausgeben (ohne Netz)
     Code { id: String },
+    /// Über die Browser-Wallet angelegte Tresore eines Besitzers als JSON (ohne
+    /// Netz, liest nur; ohne Pfade von Schlüsseldateien): „Meine Tresore“ der
+    /// öffentlichen Seite
+    Owned {
+        /// Besitzer: Kaspa-Adresse (kaspa:q…) oder x-only-Pubkey (64 Hex)
+        owner: String,
+    },
     /// Tresor aus einem Tresor-Code übernehmen; am Node geprüft, sendet nichts.
     /// Liegt der Schlüssel des Empfängers in keys/ (oder mit --key), wird eine
     /// verschlüsselte Nachricht entschlüsselt und muss die Beschreibung ergeben
@@ -571,7 +578,8 @@ enum WalletCmd {
     /// nichts, braucht keine Schlüsseldatei): Plan-JSON mit unsignierter Tx und
     /// Anfragen für KasWare (signPskt) und Kastle (signTx). Aktionen:
     /// open-vault, mint, repay, deposit, withdraw, close, redeem, liquidate,
-    /// sweep, send, transfer, swap, pool-add, pool-remove
+    /// sweep, send, transfer, swap, pool-add, pool-remove; Tresore (Zustand
+    /// ist die Tresor-Datei): tresor-open, tresor-topup, tresor-cancel
     Build {
         action: String,
         /// Kaspa-Adresse der Wallet (kaspa:q…); Gebühr und Einlagen kommen von dort
@@ -605,6 +613,30 @@ enum WalletCmd {
         min_kas: Option<f64>,
         #[arg(long)]
         min_ghost: Option<f64>,
+        /// tresor-open: KAS je Zahlung (mindestens 1)
+        #[arg(long)]
+        amount: Option<f64>,
+        /// tresor-open: monthly | weekly | daily | Anzahl Tage
+        #[arg(long)]
+        interval: Option<String>,
+        /// tresor-open: erster Termin JJJJ-MM-TT (UTC; Standard: heute)
+        #[arg(long)]
+        start: Option<String>,
+        /// tresor-open: Uhrzeit der Termine HH:MM in UTC (Standard 00:00)
+        #[arg(long)]
+        time: Option<String>,
+        /// tresor-open: Anzahl der Zahlungen (ohne Angabe: unbegrenzt)
+        #[arg(long)]
+        count: Option<u32>,
+        /// tresor-open: Startguthaben in KAS (Standard mit --count: Anzahl × (Betrag + Höchstgebühr) + 1 KAS)
+        #[arg(long)]
+        fund: Option<f64>,
+        /// tresor-open: Höchstgebühr je Zahlung in KAS (Standard 0.01)
+        #[arg(long)]
+        max_fee: Option<f64>,
+        /// tresor-topup, tresor-cancel: volle Covenant-ID des Tresors (64 Hex)
+        #[arg(long)]
+        tresor: Option<String>,
     },
     /// Signierte Tx der Wallet zu einem Plan von `wallet build` übernehmen: Plan
     /// aus dem Zustand neu bauen und vergleichen, Signaturen prüfen, mit den
@@ -895,7 +927,9 @@ impl Ctx {
     /// sperren und das Journal auflösen (Zustand übernehmen); klappt das nicht,
     /// macht es der nächste Abgleich. Ok(true) = bestätigt, Ok(false) =
     /// gesendet, Bestätigung steht aus (das Journal klärt den Rest, A17-2).
-    async fn send_wallet(&self, lock: store::Lock, what: &str, b: &Built, next: &Deployment) -> Result<bool, String> {
+    /// `next` = Folgezustand der Datei `self.state_path` (deployments/<netz>.json
+    /// oder bei Tresor-Aktionen die Tresor-Datei).
+    async fn send_wallet(&self, lock: store::Lock, what: &str, b: &Built, next: &impl serde::Serialize) -> Result<bool, String> {
         let mut rec = serde_json::json!({
             "action": what,
             "txid": b.tx.id().to_string(),
@@ -1212,6 +1246,10 @@ async fn run(cli: Cli) -> Result<Option<serde_json::Value>, String> {
     let p = ctx.net.params.clone();
     let _lock = match cli.cmd {
         Cmd::OracleFeed { .. } | Cmd::Agent { .. } => None,
+        // öffentlich erreichbar (.k-Namen, GHOST-Suche der Seite): nie die Hauptsperre
+        // halten, auf die Orakel, Keeper und Wallet-Senden warten (Audit 19 A19-4);
+        // receive sperrt nur kurz zum Speichern
+        Cmd::Utxos { .. } | Cmd::Receive { owner: Some(_), .. } => None,
         _ => Some(store::lock(&ctx.state_path, Duration::from_secs(120))?),
     };
 
@@ -1749,12 +1787,21 @@ async fn run(cli: Cli) -> Result<Option<serde_json::Value>, String> {
                 }
                 (None, None) => return Err("--key oder --owner angeben".into()),
             };
-            let mut d = ctx.load_synced().await?;
+            let public = owner.is_some();
+            // öffentlich: ohne Netzabgleich lesen (A19-4), gespeichert wird unten unter kurzer Sperre
+            let mut d = if public { ctx.load()? } else { ctx.load_synced().await? };
             let gcov = d.vault_params.as_ref().ok_or("nicht initialisiert")?.ghost_cov;
             let a = amount(ghost, "--ghost")?;
             let tok = GhostTok::to_pubkey(&me, a);
             let tspk = spk(&tok.artifact());
             let found: Vec<_> = ctx.net.utxos(&ctx.net.address_of_spk(&tspk)?).await?.into_iter().filter(|(_, e)| e.covenant_id == Some(gcov)).collect();
+            let _save_lock = if public && !found.is_empty() && !ctx.dry_run {
+                let l = store::lock(&ctx.state_path, Duration::from_secs(10))?;
+                d = ctx.load()?;
+                Some(l)
+            } else {
+                None
+            };
             let (mut new, mut known) = (0usize, 0usize);
             for (op, e) in found {
                 if d.tokens.iter().any(|t| t.outpoint == op) {
@@ -3999,12 +4046,22 @@ async fn wallet_action_cmd(network: &str, rpc: Option<&str>, state_path: &Path, 
         }
         _ => None,
     };
+    // Tresor-Aktionen: Zustand, Sperre und Journal an der Tresor-Datei
+    let tresor_action = match (cmd, &submitted) {
+        (WalletCmd::Build { action, .. }, _) => action.starts_with("tresor-"),
+        (_, Some((plan, _))) => plan.action.is_tresor(),
+        _ => false,
+    };
+    let state_path = if tresor_action { tresor::path_for(state_path) } else { state_path.to_path_buf() };
     let net = Net::connect(network, rpc).await?;
     let prefix = net.prefix;
-    let ctx = Ctx { mainnet: network == "mainnet", yes, dry_run: !sending, network: network.into(), net, state_path: state_path.to_path_buf() };
+    let ctx = Ctx { mainnet: network == "mainnet", yes, dry_run: !sending, network: network.into(), net, state_path };
     let p = ctx.net.params.clone();
     match cmd {
         WalletCmd::Build { address, .. } => {
+            if tresor_action {
+                return wallet_tresor_build(&ctx, cmd).await;
+            }
             let owner = xonly_of_address(address, prefix)?;
             let d = load_readonly(&ctx).await?;
             let a = wallet_action_of(&d, prefix, &owner, cmd)?;
@@ -4028,6 +4085,9 @@ async fn wallet_action_cmd(network: &str, rpc: Option<&str>, state_path: &Path, 
         }
         WalletCmd::Submit { send, .. } => {
             let (plan, signed) = submitted.ok_or("wallet submit ohne Plan")?;
+            if tresor_action {
+                return wallet_tresor_submit(&ctx, plan, signed, *send).await;
+            }
             // Erst ohne Sperre: eigene UTXOs am Node, Neubau aus dem gelesenen
             // Stand, Wallet-Antwort einsetzen und wie der Konsens prüfen
             // Audit 18 G-3: zuerst die billige Prüfung am Node (eigene UTXOs noch
@@ -4100,14 +4160,7 @@ fn tresor_schedule(interval: &str, start: chrono::NaiveDate, time: Option<&str>)
 }
 
 fn tresor_interval_text(p: &TresorParams) -> String {
-    let day = kaspa_lending_protocol::standing::DAY_MS;
-    match (p.anchor_day, p.period_ms) {
-        (d, _) if d > 0 => format!("monatlich am {d}."),
-        (_, x) if x == day => "täglich".into(),
-        (_, x) if x == 7 * day => "wöchentlich".into(),
-        (_, x) if x % day == 0 => format!("alle {} Tage", x / day),
-        (_, x) => format!("alle {} min", x / 60_000),
-    }
+    tresor::interval_text(p)
 }
 
 fn xonly_address(prefix: kaspa_addresses::Prefix, x: &[u8]) -> String {
@@ -4163,6 +4216,22 @@ fn tresor_json_with(network: &str, r: &TresorRec, sk: Option<&SecretKey>) -> ser
     })
 }
 
+/// Tresor für die öffentliche Seite („Meine Tresore“, `tresor owned`): wie
+/// `tresor_json`, aber ohne Pfad der Schlüsseldatei und ohne Fehlertexte des
+/// Agenten; dazu, ob er über die Wallet angelegt wurde und ob der Tresor die
+/// Netzgebühr der nächsten Zahlung selbst trägt
+fn tresor_public_json(network: &str, r: &TresorRec) -> serde_json::Value {
+    let mut v = tresor_json(network, r);
+    if let Some(o) = v.as_object_mut() {
+        o.remove("key");
+        o.remove("lastError");
+        o.insert("wallet".into(), r.wallet.into());
+        o.insert("feeFromTresor".into(), tresor::fee_from_tresor(&r.params, r.utxo.value).into());
+        o.insert("valueSompi".into(), r.utxo.value.into());
+    }
+    v
+}
+
 /// Schlüsseldatei in `dir`, deren x-only-Pubkey `x` ist (nur der Schlüssel,
 /// nichts wird ausgegeben); None, wenn keine passt
 fn recipient_key(dir: &Path, x: &[u8]) -> Option<SecretKey> {
@@ -4173,6 +4242,17 @@ fn recipient_key(dir: &Path, x: &[u8]) -> Option<SecretKey> {
         let k = key_from_hex(&kf.secret).ok()?;
         (xonly(&k).as_slice() == x).then(|| SecretKey::from_keypair(&k))
     })
+}
+
+/// Offenes Journal einer Wallet-Tx an der Tresor-Datei `path`: Tx-ID,
+/// Aktion und die Tresor-Datei, die bei Annahme gilt (nur lesend, A19-6)
+fn pending_wallet_tresore(path: &Path) -> Option<(String, String, tresor::TresorFile)> {
+    let p: store::Pending = serde_json::from_str(&std::fs::read_to_string(store::pending_path(path)).ok()?).ok()?;
+    if !p.wallet || p.target.as_deref() != Some(path) {
+        return None;
+    }
+    let next: tresor::TresorFile = serde_json::from_value(p.next?).ok()?;
+    Some((p.txid, p.action, next))
 }
 
 /// Tresor-Befehle ohne Netz. Ok(None) = braucht das Netz.
@@ -4218,6 +4298,31 @@ fn tresor_offline(network: &str, path: &Path, cmd: &TresorCmd, dry_run: bool) ->
             let code = TresorCode::of(network, r).encode();
             say!("{code}");
             Ok(Some(json!({ "ok": true, "network": network, "id": r.id, "code": code })))
+        }
+        TresorCmd::Owned { owner } => {
+            let prefix = kaspa_addresses::Prefix::from(kaspa_lending_protocol::net::network_id(network)?);
+            let x = kaspa_lending_protocol::wallet_ops::ghost_target(prefix, owner).map_err(|e| e.replace("Empfänger", "Besitzer"))?;
+            let f = tresor::load(path, network)?;
+            // nur über die Wallet angelegte: Tresore des Betreibers (Schlüsseldatei) bleiben privat
+            let mut list: Vec<_> = f.of_owner(&x).filter(|r| r.wallet).map(|r| tresor_public_json(network, r)).collect();
+            // A19-6: offenes Journal einer Wallet-Tx (gesendet, noch nicht
+            // übernommen) mit anzeigen – sonst fehlt ein neuer Tresor in
+            // „Meine Tresore“, bis der nächste Abgleich das Journal klärt
+            if let Some((txid, action, next)) = pending_wallet_tresore(path) {
+                let mark = |v: &mut serde_json::Value| v["pending"] = json!({ "txid": txid, "action": action });
+                for (v, r) in list.iter_mut().zip(f.of_owner(&x).filter(|r| r.wallet)) {
+                    if next.tresore.iter().any(|n| n.utxo.cov == r.utxo.cov && (n.utxo.outpoint != r.utxo.outpoint || n.ended != r.ended)) {
+                        mark(v);
+                    }
+                }
+                for n in next.of_owner(&x).filter(|n| n.wallet && !f.tresore.iter().any(|r| r.utxo.cov == n.utxo.cov)) {
+                    let mut v = tresor_public_json(network, n);
+                    mark(&mut v);
+                    list.push(v);
+                }
+            }
+            say!("{} Tresor(e) von {}", list.len(), xonly_address(prefix, &x));
+            Ok(Some(json!({ "ok": true, "network": network, "owner": xonly_address(prefix, &x), "tresore": list })))
         }
         TresorCmd::Pay { id: None, key } => {
             // ohne Fälliges keine Verbindung zum Node (Seite und Agent fragen jede Minute)
@@ -4301,7 +4406,7 @@ async fn tresor_cmd(ctx: &Ctx, cmd: TresorCmd, extra: &mut serde_json::Map<Strin
     let target = |f: &tresor::TresorFile| Some((path.clone(), serde_json::to_value(f).unwrap()));
     let save = |f: &tresor::TresorFile| if ctx.dry_run { Ok(()) } else { tresor::save(&path, f) };
     match cmd {
-        TresorCmd::List { .. } | TresorCmd::Code { .. } => unreachable!(),
+        TresorCmd::List { .. } | TresorCmd::Code { .. } | TresorCmd::Owned { .. } => unreachable!(),
         TresorCmd::Open { key, to, amount, interval, start, time, count, fund, max_fee, message, onchain_message } => {
             let k = load_key(&key)?;
             let recipient = ghost_target(ctx.net.prefix, &ctx.network, to.trim()).map_err(|e| e.replace("GHOST gehen", "Tresor-Zahlungen gehen"))?;
@@ -4315,9 +4420,7 @@ async fn tresor_cmd(ctx: &Ctx, cmd: TresorCmd, extra: &mut serde_json::Map<Strin
                 None => chrono::Utc::now().date_naive(),
             };
             let (anchor_day, period_ms, first) = tresor_schedule(&interval, start, time.as_deref())?;
-            if first < pmt - kaspa_lending_protocol::standing::DAY_MS {
-                return Err(format!("Erster Termin {} liegt in der Vergangenheit", tresor::fmt_time(first)));
-            }
+            tresor::check_first_due(first, pmt)?;
             let left = match count {
                 Some(0) => return Err("--count: mindestens 1".into()),
                 Some(c) => c as i64,
@@ -4455,16 +4558,198 @@ async fn tresor_cmd(ctx: &Ctx, cmd: TresorCmd, extra: &mut serde_json::Map<Strin
     Ok(())
 }
 
+/// Kommandozeile → Tresor-Aktion der Browser-Wallet (Termine wie `tresor open`)
+fn wallet_tresor_action_of(prefix: kaspa_addresses::Prefix, pmt: i64, cmd: &WalletCmd) -> Result<kaspa_lending_protocol::wallet_ops::Action, String> {
+    use kaspa_lending_protocol::wallet_ops::Action;
+    let WalletCmd::Build { action, kas, to, message, onchain_message, amount: per, interval, start, time, count, fund, max_fee, tresor: id, .. } = cmd else {
+        return Err("kein build".into());
+    };
+    let full_id = || -> Result<String, String> {
+        let t = id.as_deref().ok_or("--tresor fehlt (volle Covenant-ID)")?.trim().to_lowercase();
+        if t.len() != 64 || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("--tresor: volle Covenant-ID (64 Hex-Zeichen) erwartet".into());
+        }
+        Ok(t)
+    };
+    Ok(match action.as_str() {
+        "tresor-open" => {
+            let t = to.as_deref().ok_or("--to fehlt")?.trim().to_string();
+            // nur Adressen bzw. x-only-Schlüssel, nie Schlüsseldateien
+            let recipient = kaspa_lending_protocol::wallet_ops::ghost_target(prefix, &t)?;
+            let amount = need_units(*per, "--amount")?;
+            let max_fee = match max_fee {
+                Some(m) => amount_units(*m, "--max-fee")?,
+                None => tresor::DEFAULT_MAX_FEE,
+            };
+            let start = match start {
+                Some(s) => parse_date(s, "--start")?,
+                None => chrono::Utc::now().date_naive(),
+            };
+            let (anchor_day, period_ms, first) = tresor_schedule(interval.as_deref().ok_or("--interval fehlt")?, start, time.as_deref())?;
+            // früh und verständlich; verbindlich prüft wallet_ops::run_tresor,
+            // auch beim Neubau in submit (A19-1)
+            tresor::check_wallet_first_due(first, pmt)?;
+            let left = match count {
+                Some(0) => return Err("--count: mindestens 1".into()),
+                Some(c) => *c as i64,
+                None => -1,
+            };
+            // Wallet: nur öffentliche Nachricht oder keine (wallet_ops, Modulkommentar)
+            let m = message.as_deref().unwrap_or("").trim().to_string();
+            if !m.is_empty() && !*onchain_message {
+                return Err("Mit der Browser-Wallet nur öffentliche Nachricht (--onchain-message) oder keine".into());
+            }
+            let (m, _) = message_args(Some(&m), *onchain_message, Some(recipient.as_slice()))?;
+            let probe = TresorParams { owner: vec![], recipient, amount, anchor_day, period_ms, max_fee, payload_hash: vec![] };
+            let fund = match fund {
+                Some(f) => amount_units(*f, "--fund")? as u64,
+                None => tresor::suggested_fund(&probe, left).ok_or("Unbegrenzter Tresor: Startguthaben mit --fund angeben")? as u64,
+            };
+            Action::TresorOpen { to: t, amount, anchor_day, period_ms, first_due: first, count: left, fund, max_fee, message: m }
+        }
+        "tresor-topup" => Action::TresorTopup { tresor: full_id()?, kas: need_units(*kas, "--kas")? as u64 },
+        "tresor-cancel" => Action::TresorCancel { tresor: full_id()? },
+        a => return Err(format!("unbekannte Tresor-Aktion „{a}“ (tresor-open, tresor-topup, tresor-cancel)")),
+    })
+}
+
+/// Betrag in Einheiten (Pflichtwert schon vorhanden)
+fn amount_units(v: f64, name: &str) -> Result<i64, String> {
+    amount(v, name)
+}
+
+/// Tresor-Datei lesen und – für Auffüllen und Kündigen – den betroffenen
+/// Tresor am Node nachführen, erst nach der Besitzerprüfung und begrenzt
+/// (wallet_ops::follow_for_wallet, A19-2; `owner` = x-only der Adresse bzw.
+/// des Plans). Schreibt nichts; den Folgezustand schreibt nur das Journal bei
+/// Annahme (Ctx::send_wallet).
+async fn tresor_basis(ctx: &Ctx, a: &kaspa_lending_protocol::wallet_ops::Action, owner: &[u8], pmt: i64) -> Result<kaspa_lending_protocol::wallet_ops::TresorBasis, String> {
+    let (now, _, _) = abo_now();
+    let mut file = tresor::load(&ctx.state_path, &ctx.network)?;
+    if let Some(n) = kaspa_lending_protocol::wallet_ops::follow_for_wallet(&mut TresorNet { ctx, key: None }, &mut file, a, owner, pmt, &now).await? {
+        say!("{n}");
+    }
+    Ok(kaspa_lending_protocol::wallet_ops::TresorBasis { file, now, pmt })
+}
+
+/// `wallet build tresor-…`: Plan aus der Tresor-Datei (liest nur)
+async fn wallet_tresor_build(ctx: &Ctx, cmd: &WalletCmd) -> Result<serde_json::Value, String> {
+    use kaspa_lending_protocol::wallet_ops as wo;
+    let WalletCmd::Build { address, .. } = cmd else { return Err("kein build".into()) };
+    let prefix = ctx.net.prefix;
+    let owner = kaspa_lending_protocol::wallet::xonly_of_address(address, prefix)?;
+    let pmt = ctx.net.past_median_time().await?;
+    let a = wallet_tresor_action_of(prefix, pmt, cmd)?;
+    let basis = tresor_basis(ctx, &a, &owner, pmt).await?;
+    let addr = kaspa_addresses::Address::try_from(address.trim()).map_err(|_| "keine gültige Kaspa-Adresse".to_string())?;
+    let utxos = if a.needs_funding() { ctx.net.utxos(&addr).await? } else { vec![] };
+    let (plan, info) = wo::build_plan(&basis, &a, address, &ctx.network, &utxos, prefix, &ctx.net.params)?;
+    say!("Unsignierte Tx ({}) für {}: Gebühr {:.8} KAS, {} Eingänge ({} signiert die Wallet), {} Ausgänge – nichts gesendet", a.name(), plan.address, plan.fee as f64 / 1e8, plan.tx.inputs.len(), plan.signers.len(), plan.tx.outputs.len());
+    Ok(serde_json::json!({
+        "ok": true,
+        "action": a.name(),
+        "network": ctx.network,
+        "address": plan.address,
+        "feeSompi": plan.fee,
+        "outputs": plan.describe_tresor_outputs(Some(&basis.file), prefix),
+        "signInputs": plan.signers,
+        "kastle": plan.kastle(),
+        "kasware": plan.kasware(),
+        "info": info,
+        "plan": plan,
+    }))
+}
+
+/// Meldung, wenn die Sperre der Tresor-Datei belegt ist (Audit 19 A19-7).
+/// Meist hält sie der Tresor-Schritt des Agenten, der nach einer Zahlung auf
+/// die Bestätigung wartet (höchstens Takt::agent `send` = 90 s nach der ersten
+/// Sendung, dann bricht der Agent ab). Die Sperre wie bei A17-6 vor dem
+/// Warten freizugeben, hülfe hier nicht: Das Journal der Zahlung bleibt bis
+/// zur Bestätigung offen, und `resolve_pending` hielte den Wallet-Submit
+/// ebenso auf. Also eine klare Meldung, die die Seite als „gleich erneut
+/// versuchen“ erkennt (app/server/walletActions.ts `isRetryLater`): Plan nicht
+/// sperren, Signatur behalten. Gesendet wurde zu diesem Zeitpunkt nichts.
+const TRESOR_BUSY: &str = "Gerade läuft eine Zahlungsrunde für Tresore. Bitte in ein bis zwei Minuten erneut senden – es wurde nichts gesendet, deine Signatur bleibt gültig.";
+
+fn tresor_lock_busy(e: String) -> String {
+    if e.starts_with("Eine andere ghostctl-Instanz arbeitet gerade") { TRESOR_BUSY.into() } else { e }
+}
+
+/// `wallet submit` einer Tresor-Aktion: wie bei den GHOST-Aktionen erst ohne
+/// Sperre prüfen (Vorprüfung ist schon gelaufen), erst zum Senden die Sperre
+/// der Tresor-Datei, Journal klären, neu bauen und vergleichen. Der neue bzw.
+/// geänderte Tresor kommt nur über das Journal in die Datei, also erst, wenn
+/// die selbst geprüfte Tx angenommen ist.
+async fn wallet_tresor_submit(ctx: &Ctx, plan: kaspa_lending_protocol::wallet_ops::ActionPlan, signed: kaspa_lending_protocol::wallet::SafeTx, send: bool) -> Result<serde_json::Value, String> {
+    use kaspa_lending_protocol::wallet_ops as wo;
+    use serde_json::json;
+    let (prefix, p) = (ctx.net.prefix, ctx.net.params.clone());
+    check_funding_at_node(&ctx.net, &plan).await?;
+    let pmt = ctx.net.past_median_time().await?;
+    let basis = tresor_basis(ctx, &plan.action, &plan.owner, pmt).await?;
+    let r = wo::submit(&basis, &plan, &signed, &ctx.network, prefix, &p)?;
+    let rep = &r.report;
+    say!("Signatur {}", if rep.valid { "GÜLTIG – die Tx besteht die lokale Prüfung" } else { "UNGÜLTIG" });
+    for i in &rep.inputs {
+        say!("  Eingang {} ({}): {}", i.index, i.kind, i.note);
+    }
+    if let Some(e) = &rep.error {
+        say!("  Grund: {e}");
+    }
+    let mut out = json!({ "ok": true, "action": plan.action.name(), "valid": rep.valid, "report": rep, "info": r.info, "sent": false });
+    if let Some(b) = &r.built {
+        out["txid"] = b.tx.id().to_string().into();
+        out["feeSompi"] = b.fee.into();
+    }
+    if send {
+        if r.built.is_none() {
+            return Err(format!("Signatur ungültig – nicht gesendet ({})", rep.error.clone().unwrap_or_default()));
+        }
+        let lock = store::lock(&ctx.state_path, WALLET_LOCK_WAIT).map_err(tresor_lock_busy)?;
+        if let Some(msg) = store::resolve_pending(&ctx.net, &ctx.state_path).await? {
+            say!("Hinweis: {msg}");
+        }
+        check_funding_at_node(&ctx.net, &plan).await?;
+        let pmt = ctx.net.past_median_time().await?;
+        let basis = tresor_basis(ctx, &plan.action, &plan.owner, pmt).await?;
+        let r = wo::submit(&basis, &plan, &signed, &ctx.network, prefix, &p)?;
+        let (Some(b), Some(next)) = (r.built.as_ref(), r.next.as_ref()) else {
+            return Err(format!("Signatur ungültig – nicht gesendet ({})", r.report.error.clone().unwrap_or_default()));
+        };
+        let confirmed = ctx.send_wallet(lock, plan.action.label(), b, &next.file).await?;
+        out["txid"] = b.tx.id().to_string().into();
+        out["sent"] = true.into();
+        out["confirmed"] = confirmed.into();
+        if !confirmed {
+            out["pending"] = true.into();
+            out["note"] = "Gesendet; die Bestätigung steht noch aus. Bitte den Status prüfen und NICHT erneut senden.".into();
+        }
+        out["transactions"] = serde_json::Value::Array(std::mem::take(&mut *TXS.lock().unwrap()));
+    }
+    Ok(out)
+}
+
 /// Agent-Runde für Tresore: eigene Verbindung, eigene Sperre (Tresor-Datei),
 /// eigener Fehlerpfad; ohne (offline) Fälliges keine Netzabfrage. Doppelt
 /// auslösen (Seite, Empfänger, anderer Agent) ist harmlos: die zweite Tx
 /// scheitert an der verbrauchten UTXO.
 async fn tresor_agent_step(network: &str, rpc: Option<&str>, state: &Path, key: &Path, yes: bool, dry_run: bool, now: &str) {
     let path = tresor::path_for(state);
-    match tresor::load(&path, network) {
-        Ok(f) if tresor::needs_run(&f, now_ms(), true) => {}
-        Ok(_) => return,
+    // A19-6: ein offenes Journal (z. B. Wallet-Tx, deren Übernahme ghostctl
+    // nicht mehr erlebt hat) klärt der Agent in jeder Runde, auch wenn nichts
+    // fällig ist – sonst fehlt ein neuer Tresor in „Meine Tresore“
+    let journal = store::pending_path(&path).exists();
+    let due = match tresor::load(&path, network) {
+        Ok(f) => {
+            if let Some(w) = tresor_room_warning(&f, now_ms()) {
+                eprintln!("[{now}] Tresore: {w}");
+            }
+            tresor::needs_run(&f, now_ms(), true)
+        }
         Err(e) => return eprintln!("[{now}] Tresore: {e}"),
+    };
+    if !due && !journal {
+        return;
     }
     let step = async {
         let net = match Net::connect(network, rpc).await {
@@ -4474,6 +4759,11 @@ async fn tresor_agent_step(network: &str, rpc: Option<&str>, state: &Path, key: 
         let ctx = Ctx { mainnet: network == "mainnet", yes, dry_run, network: network.into(), net, state_path: path.clone() };
         match store::lock(&ctx.state_path, Duration::from_secs(60)) {
             Err(e) => eprintln!("[{now}] Tresore: {e}"),
+            Ok(_lock) if !due => match store::resolve_pending(&ctx.net, &ctx.state_path).await {
+                Ok(Some(m)) => eprintln!("[{now}] Tresore: {m}"),
+                Ok(None) => {}
+                Err(e) => eprintln!("[{now}] Tresore: {e}"),
+            },
             Ok(_lock) => {
                 let mut extra = serde_json::Map::new();
                 if let Err(e) = tresor_cmd(&ctx, TresorCmd::Pay { id: None, key: Some(key.to_path_buf()) }, &mut extra).await {
@@ -4486,6 +4776,20 @@ async fn tresor_agent_step(network: &str, rpc: Option<&str>, state: &Path, key: 
     if tokio::time::timeout(Duration::from_secs(700), step).await.is_err() {
         eprintln!("[{now}] Tresore: Runde nach 700 s abgebrochen, die nächste klärt offene Zahlungen");
     }
+}
+
+/// Warnung an den Betreiber, wenn die Tresor-Datei sich ihren Grenzen nähert
+/// (A19-3: ab 90 % der belegten Plätze bzw. aller Einträge)
+fn tresor_room_warning(f: &tresor::TresorFile, now_ms: i64) -> Option<String> {
+    let busy = f.tresore.iter().filter(|r| r.busy(now_ms)).count();
+    let (all, wallet) = (f.tresore.len(), f.tresore.iter().filter(|r| r.wallet).count());
+    (busy * 10 >= tresor::MAX_FILE_TRESORE * 9 || all * 10 >= tresor::MAX_FILE_ALL * 9).then(|| {
+        format!(
+            "Tresor-Datei fast voll: {busy} von {} Plätzen belegt, {all} von {} Einträgen ({wallet} über die Browser-Wallet) – bitte prüfen, ob jemand die Plätze absichtlich füllt",
+            tresor::MAX_FILE_TRESORE,
+            tresor::MAX_FILE_ALL
+        )
+    })
 }
 
 #[cfg(test)]
@@ -4813,6 +5117,41 @@ mod tests {
         assert!(chk.contains("o==op&&x.amount==e.amount&&x.script_public_key==e.script_public_key&&x.covenant_id.is_none()"), "{chk}");
     }
 
+    /// Tresor-Aktionen der Browser-Wallet (wallet build | submit tresor-…):
+    /// Zustand, Sperre und Journal an der Tresor-Datei; nie eine
+    /// Schlüsseldatei (auch nicht als Empfänger); build und die Prüfung ohne
+    /// --send schreiben nichts; die Sperre kommt erst nach der Prüfung, unter
+    /// ihr wird das Journal geklärt, neu gebaut und verglichen, und den neuen
+    /// Stand der Tresor-Datei schreibt nur das Journal bei Annahme
+    /// (send_wallet). Ein Rückbau dieser Zeilen macht den Test rot.
+    #[test]
+    fn wallet_tresor_verdrahtung() {
+        let head = code_between("async fn wallet_action_cmd(", "let net = Net::connect(network, rpc).await?;");
+        assert!(head.contains("letstate_path=iftresor_action{tresor::path_for(state_path)}else{state_path.to_path_buf()};"), "{head}");
+        let of = code_between("fn wallet_tresor_action_of(", "\n}\n");
+        assert!(!of.contains("load_key") && !of.contains("keys/") && !of.contains("Path::new"), "{of}");
+        assert!(of.contains("letrecipient=kaspa_lending_protocol::wallet_ops::ghost_target(prefix,&t)?;"), "nur Adressen/x-only: {of}");
+        assert!(of.contains("if!m.is_empty()&&!*onchain_message{returnErr("), "nur öffentliche Nachricht: {of}");
+        let basis = code_between("async fn tresor_basis(", "\n}\n");
+        assert!(!basis.contains("save(") && !basis.contains("atomic_write") && !basis.contains("resolve_pending"), "{basis}");
+        // A19-2: Nachführen nur über follow_for_wallet (Besitzer zuerst, begrenzte Suche)
+        assert!(basis.contains("kaspa_lending_protocol::wallet_ops::follow_for_wallet(&mutTresorNet{ctx,key:None},&mutfile,a,owner,pmt,&now).await?"), "{basis}");
+        assert!(!basis.contains("tresor::follow(") && !basis.contains("Search::Full"), "{basis}");
+        let build = code_between("async fn wallet_tresor_build(", "\n}\n");
+        assert!(build.contains("letowner=kaspa_lending_protocol::wallet::xonly_of_address(address,prefix)?;") && build.contains("letbasis=tresor_basis(ctx,&a,&owner,pmt).await?;"), "{build}");
+        let build = code_between("async fn wallet_tresor_build(", "\n}\n");
+        assert!(!build.contains("save(") && !build.contains("atomic_write") && !build.contains("send_wallet") && !build.contains("load_key"), "{build}");
+        let submit = code_between("async fn wallet_tresor_submit(", "\n}\n");
+        assert!(!submit.contains("load_key") && !submit.contains("tresor::save") && !submit.contains("atomic_write"), "{submit}");
+        let (unlocked, locked) = submit.split_once("letlock=store::lock(&ctx.state_path,WALLET_LOCK_WAIT).map_err(tresor_lock_busy)?;").expect("Sperre erst nach der Prüfung");
+        assert!(unlocked.contains("check_funding_at_node(&ctx.net,&plan).await?;letpmt=ctx.net.past_median_time().await?;letbasis=tresor_basis(ctx,&plan.action,&plan.owner,pmt).await?;letr=wo::submit(&basis,&plan,&signed,&ctx.network,prefix,&p)?;"), "{unlocked}");
+        assert!(unlocked.contains("ifsend{ifr.built.is_none(){returnErr("), "{unlocked}");
+        assert!(!unlocked.contains("store::lock("), "keine Sperre vor der Prüfung: {unlocked}");
+        assert!(locked.starts_with("ifletSome(msg)=store::resolve_pending(&ctx.net,&ctx.state_path).await?{"), "{locked}");
+        assert!(locked.contains("check_funding_at_node(&ctx.net,&plan).await?;letpmt=ctx.net.past_median_time().await?;letbasis=tresor_basis(ctx,&plan.action,&plan.owner,pmt).await?;letr=wo::submit(&basis,&plan,&signed,&ctx.network,prefix,&p)?;"), "{locked}");
+        assert!(locked.contains("letconfirmed=ctx.send_wallet(lock,plan.action.label(),b,&next.file).await?;"), "{locked}");
+    }
+
     #[test]
     fn a12_bp3_verdrahtung_agent_und_keeper() {
         let agent = code_between("Cmd::Agent { key,", "Cmd::OpenVault {");
@@ -5014,6 +5353,177 @@ mod tests {
         assert_eq!(reps.iter().map(|r| r.paid).collect::<Vec<_>>(), vec![true], "{reps:?}");
         assert_eq!(f.tresore[0].utxo.value, rec.utxo.value - 10 * E8, "der Tresor verliert nur den Betrag");
         assert!(sim.balance(&helfer) < 5 * E8, "Gebühr vom Schlüssel");
+    }
+
+    /// Über die Browser-Wallet angelegte Tresore (öffentliche Seite) tragen die
+    /// Netzgebühr nur selbst: Der Agent zahlt sie auch mit Schlüssel nie dazu
+    /// (TresorRec::wallet), weder in der Runde noch gezielt, und offline geht
+    /// es dafür nicht einmal zum Node.
+    #[tokio::test]
+    async fn wallet_tresor_agent_zahlt_keine_gebuehr_dazu() {
+        let mut sim = Sim::new();
+        let mut rec = knapper_tresor(&mut sim);
+        rec.wallet = true;
+        let (params, pmt) = (sim.params.clone(), sim.now_ms as i64 - tresor::PMT_LAG_MS);
+        let mut f = tresor::TresorFile::empty("mainnet");
+        f.upsert(rec.clone());
+        let helfer = test_key(3);
+        sim.faucet(&helfer, 5 * E8);
+        let reps = tresor_pay(|key| SimIo { sim: &mut sim, key }, Some(helfer), &mut f, None, pmt, "x", &params).await.unwrap();
+        assert!(reps.is_empty(), "{reps:?}");
+        let e = tresor_pay(|key| SimIo { sim: &mut sim, key }, Some(helfer), &mut f, Some(&rec.id), pmt, "x", &params).await.unwrap_err();
+        assert!(e.contains("auslösen nur mit eigenem Schlüssel"), "{e}");
+        assert_eq!(sim.balance(&helfer), 5 * E8, "keine Gebühr vom Agenten");
+        assert_eq!(f.tresore[0].utxo.value, rec.utxo.value, "unberührt");
+        assert!(!tresor::needs_run(&f, sim.now_ms as i64, true), "offline: nichts zu tun, auch mit Schlüssel");
+    }
+
+    /// `tresor owned`: nur die über die Wallet angelegten Tresore des Besitzers
+    /// (Adresse oder x-only), ohne Pfad der Schlüsseldatei; andere Netze und
+    /// Unsinn abgelehnt
+    #[test]
+    fn tresor_owned_nur_eigene_ohne_pfade() {
+        let dir = std::env::temp_dir().join(format!("ghostctl-owned-{}-{}", std::process::id(), rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mainnet-tresore.json");
+        let mut a = knapper_tresor(&mut Sim::new());
+        a.wallet = true;
+        a.key = Some("keys/geheim.json".into());
+        let mut b = a.clone();
+        b.params.owner = xonly(&test_key(4));
+        b.utxo.cov = kaspa_consensus_core::Hash::from_bytes([0xdd; 32]);
+        b.id = tresor::id_of(&b.utxo.cov);
+        // Tresor desselben Besitzers mit Schlüsseldatei (Betreiber): bleibt privat
+        let mut c = a.clone();
+        c.wallet = false;
+        c.utxo.cov = kaspa_consensus_core::Hash::from_bytes([0xde; 32]);
+        c.id = tresor::id_of(&c.utxo.cov);
+        let mut f = tresor::TresorFile::empty("mainnet");
+        f.upsert(a.clone());
+        f.upsert(b);
+        f.upsert(c);
+        tresor::save(&path, &f).unwrap();
+        let owned = |o: &str| tresor_offline("mainnet", &path, &TresorCmd::Owned { owner: o.into() }, false);
+        let addr = xonly_address(kaspa_addresses::Prefix::Mainnet, &a.params.owner);
+        for o in [addr.clone(), faster_hex::hex_string(&a.params.owner)] {
+            let v = owned(&o).unwrap().unwrap();
+            let list = v["tresore"].as_array().unwrap();
+            assert_eq!(list.len(), 1, "{v}");
+            assert_eq!(list[0]["id"], a.id);
+            assert_eq!(v["owner"], addr);
+            assert!(list[0].get("key").is_none() && !v.to_string().contains("keys/"), "{v}");
+            assert_eq!(list[0]["feeFromTresor"], false);
+        }
+        let other = xonly_address(kaspa_addresses::Prefix::Mainnet, &xonly(&test_key(5)));
+        assert_eq!(owned(&other).unwrap().unwrap()["tresore"], serde_json::json!([]));
+        assert!(owned("kaspatest:qqqq").is_err() && owned("keys/geheim.json").is_err() && owned("").is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    /// Audit 19 A19-6: Ein offenes Journal einer Wallet-Tx (gesendet, noch
+    /// nicht übernommen) erscheint in `tresor owned` – der neue Tresor als
+    /// Eintrag mit `pending`, ein geänderter mit Markierung. Fremde Tresore im
+    /// Journal und Journale ohne Wallet-Kennung bleiben außen vor.
+    #[test]
+    fn a19_6_tresor_owned_zeigt_offenes_journal() {
+        let dir = std::env::temp_dir().join(format!("ghostctl-a19-6-{}-{}", std::process::id(), rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mainnet-tresore.json");
+        let mut a = knapper_tresor(&mut Sim::new());
+        a.wallet = true;
+        let mut f = tresor::TresorFile::empty("mainnet");
+        f.upsert(a.clone());
+        tresor::save(&path, &f).unwrap();
+        // Journal: a aufgefüllt, b neu (gleicher Besitzer), c neu (fremd)
+        let mut next = f.clone();
+        next.tresore[0].utxo.outpoint = TransactionOutpoint::new(kaspa_consensus_core::Hash::from_bytes([0x11; 32]), 0);
+        let mut b = a.clone();
+        b.utxo.cov = kaspa_consensus_core::Hash::from_bytes([0xbb; 32]);
+        b.id = tresor::id_of(&b.utxo.cov);
+        let mut c = b.clone();
+        c.params.owner = xonly(&test_key(5));
+        c.utxo.cov = kaspa_consensus_core::Hash::from_bytes([0xcd; 32]);
+        next.upsert(b.clone());
+        next.upsert(c);
+        let txid = "ab".repeat(32);
+        let journal = |wallet: bool| {
+            let op = TransactionOutpoint::new(kaspa_consensus_core::Hash::from_bytes([0x22; 32]), 0);
+            let p = store::Pending {
+                action: "Tresor anlegen (Wallet)".into(),
+                txid: txid.clone(),
+                outputs: vec![],
+                first_input: (op, p2pk_spk(&a.params.owner)),
+                inputs: vec![],
+                change_output: None,
+                wallet,
+                values: vec![],
+                target: Some(path.clone()),
+                next: Some(serde_json::to_value(&next).unwrap()),
+            };
+            std::fs::write(store::pending_path(&path), serde_json::to_string(&p).unwrap()).unwrap();
+        };
+        let owner = xonly_address(kaspa_addresses::Prefix::Mainnet, &a.params.owner);
+        let owned = || tresor_offline("mainnet", &path, &TresorCmd::Owned { owner: owner.clone() }, false).unwrap().unwrap();
+        let v = owned();
+        assert_eq!(v["tresore"].as_array().unwrap().len(), 1, "ohne Journal nur die Datei");
+        assert!(v["tresore"][0].get("pending").is_none(), "{v}");
+        journal(true);
+        let v = owned();
+        let list = v["tresore"].as_array().unwrap();
+        assert_eq!(list.len(), 2, "der neue Tresor erscheint sofort: {v}");
+        assert_eq!((list[0]["id"].clone(), list[0]["pending"]["txid"].clone()), (a.id.clone().into(), txid.clone().into()), "geänderter markiert");
+        assert_eq!((list[1]["id"].clone(), list[1]["pending"]["txid"].clone()), (b.id.clone().into(), txid.clone().into()), "neuer markiert");
+        assert!(!v.to_string().contains(&tresor::id_of(&kaspa_consensus_core::Hash::from_bytes([0xcd; 32]))), "fremder Tresor nicht");
+        journal(false);
+        assert_eq!(owned()["tresore"].as_array().unwrap().len(), 1, "kein Wallet-Journal: nichts dazu");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Audit 19 A19-6: Der Tresor-Schritt des Agenten klärt ein offenes
+    /// Journal in jeder Runde, auch ohne Fälliges, und dann nur das (keine
+    /// Runde über alle Tresore). A19-3: Warnung an den Betreiber, wenn die
+    /// Datei sich den Grenzen nähert. Ein Rückbau macht den Test rot.
+    #[test]
+    fn a19_6_agent_klaert_journal_auch_ohne_faelliges() {
+        let step = code_between("async fn tresor_agent_step(", "\n}\n");
+        assert!(step.contains("letjournal=store::pending_path(&path).exists();"), "{step}");
+        assert!(step.contains("if!due&&!journal{return;}"), "{step}");
+        assert!(step.contains("Ok(_lock)if!due=>matchstore::resolve_pending(&ctx.net,&ctx.state_path).await{"), "{step}");
+        assert!(step.contains("ifletSome(w)=tresor_room_warning(&f,now_ms()){"), "{step}");
+        let mut f = tresor::TresorFile::empty("mainnet");
+        let mut r = knapper_tresor(&mut Sim::new());
+        r.utxo.value = 50 * E8;
+        let now = r.utxo.state.next_due;
+        assert!(r.busy(now));
+        for n in 0..tresor::MAX_FILE_TRESORE * 9 / 10 - 1 {
+            let mut x = r.clone();
+            let mut h = [9u8; 32];
+            h[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            x.utxo.cov = kaspa_consensus_core::Hash::from_bytes(h);
+            f.tresore.push(x);
+        }
+        assert!(tresor_room_warning(&f, now).is_none());
+        f.tresore.push(r);
+        assert!(tresor_room_warning(&f, now).unwrap().contains("fast voll"));
+    }
+
+    /// Audit 19 A19-7: Ist die Sperre der Tresor-Datei belegt (meist wartet
+    /// der Agent auf die Bestätigung einer Zahlung), bekommt der Wallet-Submit
+    /// eine Meldung, die die Seite als „gleich erneut“ erkennt; andere Fehler
+    /// bleiben unverändert.
+    #[test]
+    fn a19_7_belegte_tresor_sperre_heisst_gleich_erneut() {
+        let dir = std::env::temp_dir().join(format!("ghostctl-a19-7-{}-{}", std::process::id(), rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mainnet-tresore.json");
+        let _agent = store::lock(&path, Duration::ZERO).unwrap();
+        let e = store::lock(&path, Duration::ZERO).map_err(tresor_lock_busy).err().unwrap();
+        assert_eq!(e, TRESOR_BUSY);
+        assert!(e.contains("Zahlungsrunde für Tresore") && e.contains("nichts gesendet") && e.contains("erneut senden"), "{e}");
+        assert_eq!(tresor_lock_busy("Sperre x: Zugriff verweigert".into()), "Sperre x: Zugriff verweigert");
+        drop(_agent);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Dieselbe Übergabe schon vor der Verbindung zum Node (`tresor pay` ohne

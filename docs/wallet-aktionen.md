@@ -4,7 +4,7 @@ Jeder Besucher signiert mit seiner eigenen Browser-Wallet (KasWare `signPskt`, K
 
 ## Aktionen
 
-open-vault, mint, repay, deposit, withdraw, close, redeem, liquidate, sweep, send (KAS), transfer (GHOST), swap, pool-add, pool-remove.
+open-vault, mint, repay, deposit, withdraw, close, redeem, liquidate, sweep, send (KAS), transfer (GHOST), swap, pool-add, pool-remove; Tresore (Daueraufträge): tresor-open, tresor-topup, tresor-cancel (Abschnitt „Tresore“ unten).
 
 Nicht über die Wallet: Orakel-Update, Unterzeichner-Austausch, Deployment, pool-open (Betreiber, Schlüsseldatei).
 
@@ -15,6 +15,7 @@ Was die Wallet signiert:
 | eigene KAS (Gebühr, Einlage) | `p2pk` | jede Aktion |
 | Covenant mit Besitzersignatur (`sig_at`) | `entry` | Vault mint (Pos. 3), repay (2), deposit (0), withdraw (2), close (1) |
 | eigene GHOST bzw. Pool-Anteile | `leader` / `delegate` | transfer, repay, redeem, liquidate, swap (Verkauf), pool-add, pool-remove |
+| Tresor mit Besitzersignatur | `entry` | tresor-topup (`topUp`, Pos. 0), tresor-cancel (`cancel`, Pos. 0) |
 
 ## Ablauf
 
@@ -84,6 +85,32 @@ Die Korrekturen in der Seite (A17-3, -4, -5, -7, -8, -9) sind auf dieselbe Weise
 - Zeitlimits: Senden 170 s in der Seite, der Webserver davor muss länger warten (nginx/Apache 180 s, Caddy ohne Limit). Zeitüberschreitung, 5xx, Netzfehler oder ein Fehler nach dem Senden heißen auf der Seite „unklar – Status prüfen, nicht erneut senden“, nie „nicht gesendet“ (A17-7).
 - Größen: Plan + Antwort messen bis etwa 130 kB, die Seite nimmt bis 768 kB an, der Webserver muss mindestens das durchlassen (Vorlagen: 1 MB, A17-5).
 - Fehlermeldungen ohne absolute Server-Pfade (A17-8); Content-Security-Policy in prod.ts (A17-9).
+
+## Tresore (Daueraufträge) mit der Wallet
+
+Vertrag `contracts/standing_order.sil` (unverändert), Rust `src/tresor.rs`, Bau `src/wallet_ops.rs` (`TresorBasis`).
+
+```
+ghostctl --json wallet build tresor-open --address kaspa:q… --to kaspa:q… --amount 10 --interval monthly \
+         --start 2027-02-01 [--count 12 | --fund 100] [--max-fee 0.01] [--message=Miete --onchain-message]
+ghostctl --json wallet build tresor-topup  --address kaspa:q… --tresor <Covenant-ID, 64 Hex> --kas 5
+ghostctl --json wallet build tresor-cancel --address kaspa:q… --tresor <Covenant-ID, 64 Hex>
+ghostctl --json tresor owned kaspa:q…        # „Meine Tresore“: nur über die Wallet angelegte, ohne Pfade
+```
+
+Seite: dieselben Routen `POST /api/wallet/build|submit`, dazu `GET /api/wallet/tresore?network=…&owner=kaspa:q…` (nur lesend, gleiche Ratenbegrenzung). Wallet-Seite im öffentlichen Modus: Abschnitt „Daueraufträge (Tresor)“ (components/WalletTresor.tsx).
+
+- **Zustand** ist die Tresor-Datei `deployments/<netz>-tresore.json` (`tresor::path_for`), nicht deployments/<netz>.json. Sperre und Journal liegen an dieser Datei, wie bei `ghostctl tresor …`. build und submit ohne `--send` lesen nur; für Auffüllen und Kündigen wird der Tresor vorher am Node nachgeführt (`wallet_ops::follow_for_wallet`): erst nach der Besitzerprüfung und höchstens über `tresor::PUBLIC_FOLLOW` (64) Zustände; fremde, gekündigte und als fehlend markierte Tresore kosten keine Node-Abfrage (A19-2).
+- **Besitzer** eines über die Wallet angelegten Tresors ist der x-only-Schlüssel der Wallet. In der Messkopie wird er wie Vaults und Token durch den Ersatzschlüssel ersetzt; Tresore, die schon dem Ersatzschlüssel gehören, bekommen einen neutralen Besitzer (A17-1).
+- **Eintrag in der Tresor-Datei nur nach Erfolg:** Der Folgezustand (neuer Eintrag, nachgeführter Betrag, `ended`) kommt aus dem Neubau unter Sperre und geht über das Journal (`Ctx::send_wallet`, Merkmal `wallet`) in die Datei, also erst, wenn die selbst gebaute und geprüfte Tx angenommen ist. Nichts aus dem Plan des Browsers geht in die Datei ein außer über den bitgleichen Neubau. Die Aktion selbst stammt dort aus dem Plan; darum prüft `run_tresor` (build UND Neubau in submit) alle Regeln, auch den ersten Termin gegen die Past Median Time (`TresorBasis::pmt`): höchstens einen Tag zurück, höchstens ein Jahr voraus (`tresor::check_wallet_first_due`, A19-1).
+- **Offenes Journal:** `tresor owned` zeigt eine gesendete, noch nicht übernommene Wallet-Tx mit an (`pending`); der Agent klärt ein offenes Journal der Tresor-Datei in jeder Runde, auch ohne fällige Zahlung (A19-6).
+- **Grenzen (A19-3):** höchstens 10 laufende Tresore je Besitzer (`tresor::MAX_WALLET_PER_OWNER`); höchstens 1 000 *belegte* Plätze (`MAX_FILE_TRESORE`, `TresorRec::busy`: laufend, zahlbar, binnen 32 Tagen fällig) und 3 000 Einträge insgesamt (`MAX_FILE_ALL`). Ab 1 000 Einträgen fallen gekündigte und seit über einer Woche fehlende Wallet-Tresore heraus, laufende mit Guthaben nie. Jeder Tresor bindet mindestens Betrag + Höchstgebühr + 1 KAS. Ab 90 % warnt der Agent im Log.
+- **Sperre belegt (A19-7):** Wartet der Agent gerade auf die Bestätigung einer Tresor-Zahlung, meldet submit „Gerade läuft eine Zahlungsrunde für Tresore …“; die Seite sperrt den Plan dann nicht und lässt erneut senden.
+- **Auffüllen/Kündigen** nur der Besitzer (früh in `wallet_ops`, endgültig im Vertrag). Kündigen braucht keine eigenen KAS: die Gebühr kommt aus dem Tresor; der Plan hat dann nur den Tresor-Eingang. Mit Wallet wird `tresor::cancel` genau einmal gebaut, mit derselben Gebühr im Ausgang wie die Messkopie (`txb::wallet_fill_fee`).
+- **Zahlen** (`pay`) bleibt beim Agenten (`tresor_agent_step`, `tresor::pay_round`); es braucht keine Signatur des Besitzers. Je Tresor und Runde höchstens ein Termin, fällige Tresore reihum (am längsten nicht bediente zuerst, `last_paid_ms`, A19-1). Bei Wallet-Tresoren (`TresorRec::wallet`) zahlt der Agent die Netzgebühr **nie** mit eigenem Schlüssel dazu, sie kommt nur aus dem Tresor (Höchstgebühr). Sonst ließe sich sein Guthaben über fremde Tresore mit knappem Rest aufbrauchen. Reicht das Guthaben nicht für Betrag, Höchstgebühr und 1 KAS Rest, zahlt er nicht; die Seite zeigt „Guthaben knapp“.
+- **Nachricht** nur öffentlich (Klartext, im Vertrag als `payloadHash` gebunden) oder keine. Verschlüsseln ginge ohne Geheimschlüssel des Absenders (message.rs nimmt einen Einmalschlüssel), aber die verschlüsselte Fassung ist zufällig und müsste beim Neubau aus dem Plan des Browsers übernommen werden; ob sie zur Beschreibung passt, könnte der Server ohne Schlüssel des Empfängers nicht prüfen.
+- **Liste** (`tresor owned`) zeigt nur über die Wallet angelegte Tresore der Adresse (keine Tresore des Betreibers, keine Pfade von Schlüsseldateien, keine Fehlertexte des Agenten). Sie ist öffentlich wie die Adresse: Wer eine Adresse kennt, sieht deren Wallet-Tresore samt Empfänger und Betrag (nach der ersten Zahlung steht das ohnehin im Redeem-Skript auf der Kette).
+- Tests: tests/wallet_ops_tests.rs (Abschnitt „Tresore“), ghostctl `wallet_tresor_verdrahtung`, `wallet_tresor_agent_zahlt_keine_gebuehr_dazu`, `tresor_owned_nur_eigene_ohne_pfade`, Audit 19 (`a19_*` in tests/wallet_ops_tests.rs und ghostctl); Rückbau-Probe: sechs Tresor-Mutanten in tests/wallet_ops_mutation.sh.
 
 ## Grenzen
 

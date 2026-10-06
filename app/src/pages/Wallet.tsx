@@ -6,6 +6,7 @@ import { useWallet } from "../wallet/WalletContext";
 import { CopyButton } from "../components/CopyCode";
 import { StatusNotices } from "../components/Network";
 import { StandingOrders } from "../components/StandingOrders";
+import { WalletTresor } from "../components/WalletTresor";
 import { IncomingMessages } from "../components/IncomingMessages";
 import { QrCode } from "../components/QrCode";
 import { AmountInput, Callout } from "../components/ui";
@@ -220,8 +221,10 @@ export function Wallet() {
 
       <ActionForms prefill={null} actions={["transfer", "send"]} title={tr("Senden", "Send")} id="senden" />
 
-      {/* Daueraufträge und Nachrichten nutzen Schlüsseldateien des Servers – öffentlich gesperrt */}
-      {!pub && <StandingOrders />}
+      {/* Daueraufträge: öffentlich nur mit Tresor über die Browser-Wallet (Besitzer = Wallet,
+          zahlen löst der Agent aus); mit Schlüsseldateien wie bisher. Nachrichten nutzen
+          Schlüsseldateien des Servers – öffentlich gesperrt */}
+      {pub ? <WalletTresor /> : <StandingOrders />}
 
       {!pub && <IncomingMessages />}
 

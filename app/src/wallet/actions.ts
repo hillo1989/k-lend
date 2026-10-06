@@ -33,6 +33,15 @@ export const WALLET_ACTIONS: readonly CliAction[] = [
 
 export const walletSupports = (a: CliAction) => WALLET_ACTIONS.includes(a);
 
+/**
+ * Tresor-Aktionen der Browser-Wallet (Daueraufträge, ghostctl wallet build
+ * tresor-…); Formular und Liste in components/WalletTresor.tsx
+ */
+export const TRESOR_WALLET_ACTIONS = ["tresor-open", "tresor-topup", "tresor-cancel"] as const;
+export type TresorWalletAction = (typeof TRESOR_WALLET_ACTIONS)[number];
+/** Alles, was über /api/wallet/build geht */
+export type WalletActionName = CliAction | TresorWalletAction;
+
 /** Erlaubte Parameter je Aktion (wie server/walletActions.ts) */
 const ALLOWED: Record<string, string[]> = {
   "open-vault": ["kas"],
@@ -49,7 +58,13 @@ const ALLOWED: Record<string, string[]> = {
   swap: ["kas", "ghost", "min"],
   "pool-add": ["kas", "ghost", "minShares"],
   "pool-remove": ["percent", "minKas", "minGhost"],
+  "tresor-open": ["to", "amount", "interval", "start", "count", "fund", "maxFee", "message"],
+  "tresor-topup": ["tresor", "kas"],
+  "tresor-cancel": ["tresor"],
 };
+
+/** Erlaubte Parameter einer Wallet-Aktion (wie server/walletActions.ts WALLET_PARAMS) */
+export const walletParamsOf = (a: WalletActionName): readonly string[] => ALLOWED[a] ?? [];
 
 /**
  * Formular-Parameter (wie für /api/action) → Parameter für /api/wallet/build.
@@ -123,7 +138,16 @@ export function sendOutcome(r: SubmitResult): "confirmed" | "pending" | "unclear
   return "failed";
 }
 
-export function buildBody(network: NetworkId, action: CliAction, address: string, params: ActionParams) {
+/**
+ * Bleibt die geprüfte Signatur nach einem Sendeversuch stehen? Nur wenn
+ * sicher nichts gesendet wurde und ein neuer Versuch gleich gelingen kann
+ * (`busy`: Seite ausgelastet oder Sperre belegt, Audit 19 A19-7).
+ */
+export function keepSigned(r: SubmitResult): boolean {
+  return r.busy === true && !r.sent && !r.unclear && !r.timeout;
+}
+
+export function buildBody(network: NetworkId, action: WalletActionName, address: string, params: ActionParams) {
   return { network, action, address, params };
 }
 

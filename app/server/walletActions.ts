@@ -6,6 +6,13 @@
 //        → ghostctl wallet build <aktion> --address … [Parameter]   (sendet nichts)
 //   POST /api/wallet/submit  {network, plan, signed, send?, confirmMainnet?}
 //        → ghostctl wallet submit --plan P --signed S [--send]
+//   GET  /api/wallet/tresore?network=…&owner=kaspa:q…
+//        → ghostctl tresor owned <Adresse>   (liest nur die Tresor-Datei)
+//
+// Tresore (Daueraufträge, contracts/standing_order.sil): tresor-open legt
+// KAS der Wallet in einen neuen Tresor (Besitzer = Wallet), tresor-topup und
+// tresor-cancel signiert die Wallet als Besitzer. Zahlen löst der GHOST-Agent
+// auf dem Server aus (ohne Schlüssel des Besitzers). Nachricht nur öffentlich.
 //
 // Grundsätze (öffentlicher Modus, viele Besucher):
 // - Es gibt KEINE Schlüsseldateien in diesen Routen: Adressen und Pläne, nie
@@ -19,7 +26,7 @@
 // - Ratenbegrenzung je Absender (createRateLimiter) zusätzlich zur
 //   Begrenzung paralleler ghostctl-Aufrufe in api.ts.
 import { isIP } from "node:net";
-import { checkAmount, checkMessage, checkVault, isNetwork, ValidationError, type Network } from "./actions.ts";
+import { checkAmount, checkDate, checkInterval, checkMessage, checkVault, isNetwork, ValidationError, type Network } from "./actions.ts";
 import { checkProbeAddress } from "./walletProbe.ts";
 
 export const WALLET_ACTIONS = [
@@ -37,6 +44,9 @@ export const WALLET_ACTIONS = [
   "swap",
   "pool-add",
   "pool-remove",
+  "tresor-open",
+  "tresor-topup",
+  "tresor-cancel",
 ] as const;
 export type WalletAction = (typeof WALLET_ACTIONS)[number];
 
@@ -62,7 +72,28 @@ export const WALLET_PARAMS: Record<WalletAction, string[]> = {
   swap: ["kas", "ghost", "min"],
   "pool-add": ["kas", "ghost", "minShares"],
   "pool-remove": ["percent", "minKas", "minGhost"],
+  "tresor-open": ["to", "amount", "interval", "start", "count", "fund", "maxFee", "message"],
+  "tresor-topup": ["tresor", "kas"],
+  "tresor-cancel": ["tresor"],
 };
+
+/** Tresor: kleinster Betrag je Zahlung, Grenzen der Höchstgebühr in sompi (tresor.rs) */
+export const TRESOR_MIN_AMOUNT = 100_000_000n;
+export const TRESOR_MIN_MAX_FEE = 400_000n;
+export const TRESOR_MAX_MAX_FEE = 10_000_000n;
+/** Tresor im Plan: volle Covenant-ID (64 Hex, klein) */
+const COVENANT_ID_RE = /^[0-9a-f]{64}$/;
+
+/** Dezimaltext (nach checkAmount) → sompi */
+function sompi(s: string): bigint {
+  const [w, f = ""] = s.split(".");
+  return BigInt(w) * 100_000_000n + BigInt((f + "00000000").slice(0, 8));
+}
+
+function covenantId(v: unknown): string {
+  if (typeof v !== "string" || !COVENANT_ID_RE.test(v)) throw new ValidationError("Tresor: volle Covenant-ID (64 Hex-Zeichen, klein) erwartet.");
+  return v;
+}
 
 const XONLY_RE = /^[0-9a-f]{64}$/;
 // Kaspa-Adresse beliebiger Version (q = Schnorr, p = Skript, …); bech32-Zeichen
@@ -178,6 +209,41 @@ export function buildWalletBuildArgs(r: WalletBuildRequest): { network: Network;
         args.push("--min-shares", BigInt(m).toString());
       }
       break;
+    case "tresor-open": {
+      // Empfänger: Schnorr-Adresse dieses Netzes, nicht die eigene
+      let to: string;
+      try {
+        to = checkProbeAddress(params.to, network);
+      } catch {
+        throw new ValidationError("Empfänger: Schnorr-Adresse (kaspa:q…) dieses Netzes erwartet.");
+      }
+      if (to === address) throw new ValidationError("Empfänger ist die eigene Adresse.");
+      const amount = checkAmount(params.amount, "Betrag je Zahlung");
+      if (sompi(amount) < TRESOR_MIN_AMOUNT) throw new ValidationError("Betrag: mindestens 1 KAS je Zahlung.");
+      args.push("--to", to, "--amount", amount, "--interval", checkInterval(params.interval), "--start", checkDate(params.start, "Erster Termin"));
+      if (has("count")) {
+        const c = String(params.count);
+        if (!/^\d{1,4}$/.test(c) || Number(c) < 1) throw new ValidationError("Anzahl: ganze Zahl von 1 bis 9999.");
+        args.push("--count", String(Number(c)));
+      }
+      if (has("fund")) args.push("--fund", checkAmount(params.fund, "Startguthaben"));
+      else if (!has("count")) throw new ValidationError("Unbegrenzter Tresor: Startguthaben angeben.");
+      if (has("maxFee")) {
+        const f = checkAmount(params.maxFee, "Höchstgebühr");
+        if (sompi(f) < TRESOR_MIN_MAX_FEE || sompi(f) > TRESOR_MAX_MAX_FEE) throw new ValidationError("Höchstgebühr: 0.004 bis 0.1 KAS je Zahlung.");
+        args.push("--max-fee", f);
+      }
+      // Nachricht mit der Browser-Wallet nur öffentlich (steht in jeder Zahlung)
+      const m = checkMessage(params.message);
+      if (m) args.push(`--message=${m}`, "--onchain-message");
+      break;
+    }
+    case "tresor-topup":
+      args.push("--tresor", covenantId(params.tresor), "--kas", checkAmount(params.kas, "KAS-Betrag"));
+      break;
+    case "tresor-cancel":
+      args.push("--tresor", covenantId(params.tresor));
+      break;
     case "pool-remove": {
       if (has("percent")) {
         const pct = checkAmount(params.percent, "Anteil in Prozent");
@@ -190,6 +256,33 @@ export function buildWalletBuildArgs(r: WalletBuildRequest): { network: Network;
     }
   }
   return { network, action, address, args };
+}
+
+/**
+ * Fehler von `ghostctl wallet submit`, bei denen sicher nichts gesendet wurde
+ * und ein neuer Versuch in Kürze gelingt (Audit 19 A19-7): Die Sperre ist
+ * belegt – meist wartet der Agent auf die Bestätigung einer Tresor-Zahlung
+ * (ghostctl `TRESOR_BUSY`) – oder das Journal einer eben gesendeten Tx ist
+ * noch offen. Der Plan wird dann nicht gesperrt (G-3), die Seite behält die
+ * geprüfte Signatur und lässt erneut senden.
+ */
+export function isRetryLater(error: unknown): boolean {
+  return (
+    typeof error === "string" &&
+    /Gerade läuft eine Zahlungsrunde für Tresore|Eine andere ghostctl-Instanz arbeitet gerade|ist noch unterwegs\. Bitte kurz warten|ist noch nicht geklärt\. Bitte kurz warten/.test(error)
+  );
+}
+
+/**
+ * GET /api/wallet/tresore?network=…&owner=kaspa:q… → ghostctl tresor owned:
+ * die über die Wallet angelegten Tresore dieses Besitzers (nur lesend, ohne
+ * Pfade; öffentlich wie die Adresse selbst)
+ */
+export function buildWalletTresoreArgs(network: unknown, owner: unknown): string[] {
+  const n = network ?? "mainnet";
+  if (!isNetwork(n)) throw new ValidationError("Unbekanntes Netz.");
+  const o = checkProbeAddress(owner, n);
+  return ["--network", n, "--json", "tresor", "owned", o];
 }
 
 export interface WalletSubmitRequest {

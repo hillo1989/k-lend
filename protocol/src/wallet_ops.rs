@@ -42,10 +42,24 @@
 //! - Kastle bekommt für Covenant-Eingänge `scripts` mit dem Redeem-Skript;
 //!   für Leader/Delegate der KCC20-Token ist das das Token-Skript. Ob Kastle
 //!   mehrere solcher Einträge in einer Tx annimmt, ist nicht belegt.
+//!
+//! Tresore (Daueraufträge, contracts/standing_order.sil, src/tresor.rs):
+//! tresor-open, tresor-topup und tresor-cancel laufen denselben Weg, nur ist
+//! der Zustand nicht deployments/<netz>.json, sondern die Tresor-Datei
+//! (`TresorBasis`, deployments/<netz>-tresore.json). Besitzer eines über die
+//! Wallet angelegten Tresors ist der x-only-Schlüssel der Wallet; in der
+//! Messkopie wird er wie alles andere durch den Ersatzschlüssel ersetzt.
+//! Auffüllen und Kündigen signiert die Wallet am Tresor-Eingang (Zweige
+//! `topUp`/`cancel`, Besitzersignatur an Position 0). Zahlen (`pay`) braucht
+//! keine Signatur und bleibt beim Agenten. Nachrichten nur öffentlich oder
+//! keine: eine verschlüsselte Fassung wäre beim Neubau in `submit` nur aus
+//! dem Plan (also vom Browser) zu übernehmen, und ob sie zur Beschreibung
+//! passt, könnte der Server ohne Schlüssel des Empfängers nicht prüfen.
 
 use crate::contracts::*;
 use crate::ops::{self, Deployment, Funds, p2pk_spk};
 use crate::pool;
+use crate::tresor::{self, TresorFile, TresorHist, TresorRec};
 use crate::txb::{Built, Signer, WalletBuilt, WalletFill, check_block_limits, check_scripts, check_standard_sig_ops, masses, min_fee, run_input, with_wallet_fill};
 use crate::wallet::{self, InputReport, MAX_WALLET_INPUTS, Report, SafeTx, SignSpec, address_of_xonly, from_safe, strict_hex, to_safe, xonly_of_address};
 use kaspa_addresses::{Address, Prefix, Version};
@@ -99,6 +113,33 @@ pub enum Action {
     PoolAdd { kas: i64, ghost: i64, min_shares: i64 },
     #[serde(rename_all = "camelCase")]
     PoolRemove { shares: i64, min_kas: i64, min_ghost: i64 },
+    /// Tresor anlegen: `fund` sompi aus der Wallet in einen neuen Tresor,
+    /// Besitzer = Wallet; Termine wie `ghostctl tresor open` ausgerechnet
+    #[serde(rename_all = "camelCase")]
+    TresorOpen {
+        /// Empfänger: Schnorr-Adresse (kaspa:q…) oder x-only-Pubkey (64 Hex)
+        to: String,
+        /// Betrag je Zahlung (sompi)
+        amount: i64,
+        /// 1–31 = monatlich an diesem Tag, 0 = festes Intervall `period_ms`
+        anchor_day: i64,
+        period_ms: i64,
+        /// erster Termin (Unix-ms, UTC)
+        first_due: i64,
+        /// Anzahl der Zahlungen, −1 = unbegrenzt
+        count: i64,
+        /// Startguthaben (sompi)
+        fund: u64,
+        /// Höchstgebühr je Zahlung aus dem Tresor (sompi)
+        max_fee: i64,
+        /// öffentliche Nachricht jeder Zahlung (Klartext) oder leer
+        #[serde(default)]
+        message: String,
+    },
+    /// Tresor auffüllen (`tresor` = volle Covenant-ID, 64 Hex)
+    TresorTopup { tresor: String, kas: u64 },
+    /// Tresor kündigen: Rest abzüglich Gebühr an den Besitzer
+    TresorCancel { tresor: String },
 }
 
 impl Action {
@@ -118,7 +159,18 @@ impl Action {
             Action::Swap { .. } => "swap",
             Action::PoolAdd { .. } => "pool-add",
             Action::PoolRemove { .. } => "pool-remove",
+            Action::TresorOpen { .. } => "tresor-open",
+            Action::TresorTopup { .. } => "tresor-topup",
+            Action::TresorCancel { .. } => "tresor-cancel",
         }
+    }
+    /// Tresor-Aktion (gebaut aus der Tresor-Datei statt aus deployments/<netz>.json)?
+    pub fn is_tresor(&self) -> bool {
+        matches!(self, Action::TresorOpen { .. } | Action::TresorTopup { .. } | Action::TresorCancel { .. })
+    }
+    /// Braucht eigene KAS der Wallet? Kündigen nicht: die Gebühr kommt aus dem Tresor.
+    pub fn needs_funding(&self) -> bool {
+        !matches!(self, Action::TresorCancel { .. })
     }
     /// Deutsche Bezeichnung für Journal und Meldungen
     pub fn label(&self) -> &'static str {
@@ -137,6 +189,9 @@ impl Action {
             Action::Swap { .. } => "Tauschen (Wallet)",
             Action::PoolAdd { .. } => "Liquidität einlegen (Wallet)",
             Action::PoolRemove { .. } => "Liquidität abziehen (Wallet)",
+            Action::TresorOpen { .. } => "Tresor anlegen (Wallet)",
+            Action::TresorTopup { .. } => "Tresor auffüllen (Wallet)",
+            Action::TresorCancel { .. } => "Tresor kündigen (Wallet)",
         }
     }
     /// Beträge und Nachrichtenlänge grob prüfen (genauer prüfen ops/pool)
@@ -176,7 +231,42 @@ impl Action {
                 }
                 Ok(())
             }
+            Action::TresorOpen { to, amount, fund, max_fee, count, message, .. } => {
+                if to.len() > 200 {
+                    return Err("Empfänger zu lang".into());
+                }
+                pos(*amount, "Betrag je Zahlung")?;
+                posu(*fund, "Startguthaben")?;
+                pos(*max_fee, "Höchstgebühr")?;
+                if *count != -1 && !(1..=MAX_TRESOR_COUNT).contains(count) {
+                    return Err(format!("Anzahl: 1 bis {MAX_TRESOR_COUNT} Zahlungen oder unbegrenzt"));
+                }
+                // genau der Text, der in jede Zahlung kommt (tresor::bound_payload kürzt)
+                if message.trim() != message {
+                    return Err("Nachricht: ohne Leerzeichen am Anfang oder Ende".into());
+                }
+                crate::abo::check_message(message)?;
+                check_payload(message.as_bytes())
+            }
+            Action::TresorTopup { tresor, kas } => {
+                check_tresor_id(tresor)?;
+                posu(*kas, "KAS")
+            }
+            Action::TresorCancel { tresor } => check_tresor_id(tresor),
         }
+    }
+}
+
+/// Höchstzahl der Zahlungen eines Tresors über die Wallet (wie die Seite)
+pub const MAX_TRESOR_COUNT: i64 = 9_999;
+
+/// Tresor-Kennung im Plan: volle Covenant-ID (64 Hex, klein) – eindeutig,
+/// anders als die 8 Zeichen der Liste
+fn check_tresor_id(id: &str) -> Result<(), String> {
+    if id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        Ok(())
+    } else {
+        Err("Tresor: volle Covenant-ID (64 Hex-Zeichen) erwartet".into())
     }
 }
 
@@ -188,10 +278,61 @@ fn check_payload(p: &[u8]) -> Result<(), String> {
 }
 
 /// Ergebnis eines Baus: Tx, Folgezustand, Angaben für die Anzeige
-pub struct Done {
+pub struct Done<N = Deployment> {
     pub built: Built,
-    pub next: Deployment,
+    pub next: N,
     pub info: serde_json::Value,
+}
+
+/// Zustand, aus dem eine Aktion gebaut wird: deployments/<netz>.json
+/// (`Deployment`: Vaults, GHOST, Pool) oder die Tresor-Datei (`TresorBasis`).
+/// Beide liefern ihre Messkopie und den Folgezustand.
+pub trait Basis: Clone {
+    /// Messkopie: der Nutzer `user` überall durch den Ersatzschlüssel
+    /// `mirror` ersetzt; was schon `mirror` gehörte, bekommt einen neutralen
+    /// Besitzer (A17-1)
+    fn mirror(&self, user: &[u8], mirror: &[u8]) -> Self;
+    /// Aktion bauen; `sub` ersetzt x-only-Empfänger (nur in der Messkopie)
+    fn run(&self, a: &Action, who: Signer, fund: &Funds, prefix: Prefix, net: &Params, sub: &dyn Fn(&[u8]) -> Vec<u8>) -> Result<Done<Self>, String>;
+}
+
+impl Basis for Deployment {
+    fn mirror(&self, user: &[u8], mirror: &[u8]) -> Self {
+        mirror_dep(self, user, mirror)
+    }
+    fn run(&self, a: &Action, who: Signer, fund: &Funds, prefix: Prefix, net: &Params, sub: &dyn Fn(&[u8]) -> Vec<u8>) -> Result<Done, String> {
+        run_action(self, a, who, fund, prefix, net, sub)
+    }
+}
+
+/// Zustand der Tresor-Aktionen: die Tresor-Datei des Servers (ghostctl hat
+/// den betroffenen Tresor vorher am Node nachgeführt, `follow_for_wallet`),
+/// die Zeit für den Verlauf des Folgezustands (geht nicht in die Tx ein) und
+/// die Past Median Time `pmt` (Unix-ms) für die Regeln zum ersten Termin und
+/// zu den Plätzen der Datei – in build UND im Neubau von submit (A19-1)
+#[derive(Clone, Debug)]
+pub struct TresorBasis {
+    pub file: TresorFile,
+    pub now: String,
+    pub pmt: i64,
+}
+
+impl Basis for TresorBasis {
+    fn mirror(&self, user: &[u8], mirror: &[u8]) -> Self {
+        let nobody = neutral_owner(user, mirror);
+        let mut m = self.clone();
+        for r in m.file.tresore.iter_mut() {
+            if r.params.owner == mirror {
+                r.params.owner = nobody.clone();
+            } else if r.params.owner == user {
+                r.params.owner = mirror.to_vec();
+            }
+        }
+        m
+    }
+    fn run(&self, a: &Action, who: Signer, fund: &Funds, prefix: Prefix, net: &Params, sub: &dyn Fn(&[u8]) -> Vec<u8>) -> Result<Done<Self>, String> {
+        run_tresor(self, a, who, fund, prefix, net, sub)
+    }
 }
 
 // ----------------------------------------------------------- Aktionen ----
@@ -361,6 +502,105 @@ fn run_action(d: &Deployment, a: &Action, who: Signer, fund: &Funds, prefix: Pre
             let (t, (dx, dy)) = pool::remove(&rec, who, &mine, *shares, *min_kas, *min_ghost, fund, net)?;
             Ok(Done { next: pool::apply(d, &t), built: t.built, info: serde_json::json!({ "kas": dx as f64 / 1e8, "ghost": dy as f64 / 1e8 }) })
         }
+        Action::TresorOpen { .. } | Action::TresorTopup { .. } | Action::TresorCancel { .. } => {
+            Err("Tresor-Aktionen werden aus der Tresor-Datei gebaut, nicht aus dem GHOST-Zustand".into())
+        }
+    }
+}
+
+/// Tresor der Datei über die volle Covenant-ID; nur laufende Tresore des
+/// Besitzers `me` (Auffüllen und Kündigen verlangt der Vertrag ohnehin mit
+/// dessen Signatur – hier früh und verständlich abgewiesen)
+pub fn own_tresor(f: &TresorFile, id: &str, me: &[u8]) -> Result<usize, String> {
+    let i = f.tresore.iter().position(|r| r.utxo.cov.to_string() == id).ok_or_else(|| format!("Tresor {} ist auf diesem Server nicht bekannt", &id[..8.min(id.len())]))?;
+    let r = &f.tresore[i];
+    if r.params.owner != me {
+        return Err(format!("Tresor {} gehört nicht zu dieser Adresse; auffüllen und kündigen darf nur der Besitzer.", r.id));
+    }
+    if r.ended.is_some() {
+        return Err(format!("Tresor {} ist schon gekündigt", r.id));
+    }
+    if r.missing.is_some() {
+        return Err(format!("Tresor {} ist am Node nicht auffindbar (gekündigt?)", r.id));
+    }
+    Ok(i)
+}
+
+/// Tresor der Datei für Auffüllen bzw. Kündigen über die Browser-Wallet am
+/// Node nachführen (ghostctl `wallet build | submit`, ändert nur `file` im
+/// Speicher). Audit 19 A19-2: erst der Besitzer (`own_tresor` mit `owner`,
+/// x-only aus Adresse bzw. Plan), dann die Suche, und die höchstens über
+/// tresor::PUBLIC_FOLLOW Zustände. Fremde, gekündigte und schon als fehlend
+/// markierte Tresore kosten so keine einzige Node-Abfrage. Anlegen sucht nichts.
+pub async fn follow_for_wallet(io: &mut impl tresor::TresorIo, file: &mut TresorFile, a: &Action, owner: &[u8], pmt: i64, now: &str) -> Result<Option<String>, String> {
+    let (Action::TresorTopup { tresor: id, .. } | Action::TresorCancel { tresor: id }) = a else { return Ok(None) };
+    check_tresor_id(id)?;
+    let i = own_tresor(file, id, owner)?;
+    tresor::follow(io, &mut file.tresore[i], pmt, now, tresor::Search::Public).await
+}
+
+fn tresor_hist(now: &str, action: &str, b: &Built) -> TresorHist {
+    TresorHist { at: now.into(), action: action.into(), txid: Some(b.tx.id().to_string()), due: None, note: None }
+}
+
+/// Tresor-Aktion bauen (wie ghostctl tresor open/topup/cancel, Signierer
+/// `who`); Folgezustand = Tresor-Datei mit dem neuen bzw. geänderten Eintrag
+fn run_tresor(b: &TresorBasis, a: &Action, who: Signer, fund: &Funds, prefix: Prefix, net: &Params, sub: &dyn Fn(&[u8]) -> Vec<u8>) -> Result<Done<TresorBasis>, String> {
+    a.check()?;
+    let me = who.xonly();
+    let mut next = b.clone();
+    match a {
+        Action::TresorOpen { to, amount, anchor_day, period_ms, first_due, count, fund: value, max_fee, message } => {
+            let recipient = sub(&ghost_target(prefix, to)?);
+            // nur öffentlich oder keine Nachricht (Modulkommentar)
+            let onchain = !message.is_empty();
+            let mut p = TresorParams { owner: me.clone(), recipient, amount: *amount, anchor_day: *anchor_day, period_ms: *period_ms, max_fee: *max_fee, payload_hash: vec![] };
+            tresor::bind_message(&mut p, message, onchain, message.as_bytes())?;
+            let s0 = TresorState { next_due: *first_due, left: *count };
+            tresor::check_params(&p, &s0)?;
+            // A19-1: hier und nicht nur in ghostctl build – `first_due` kommt
+            // in submit aus dem Plan des Browsers
+            tresor::check_wallet_first_due(*first_due, b.pmt)?;
+            next.file.make_room_for_wallet(&me, b.pmt)?;
+            let (built, t) = tresor::open(&p, &s0, *value, fund, net)?;
+            let mut rec = TresorRec::new(p, t, message.clone(), onchain, None, &b.now);
+            rec.wallet = true;
+            rec.push(tresor_hist(&b.now, "open", &built));
+            let info = serde_json::json!({
+                "tresor": rec.id,
+                "covenantId": rec.utxo.cov.to_string(),
+                "value": rec.utxo.value as f64 / 1e8,
+                "covered": tresor::payments_covered(&rec.params, rec.utxo.value),
+                "nextDue": first_due,
+                "interval": tresor::interval_text(&rec.params),
+            });
+            next.file.upsert(rec);
+            Ok(Done { built, next, info })
+        }
+        Action::TresorTopup { tresor: id, kas } => {
+            let i = own_tresor(&b.file, id, &me)?;
+            let r = &b.file.tresore[i];
+            let (built, t) = tresor::topup(&r.params, &r.utxo, who, *kas, fund, net)?;
+            let info = serde_json::json!({ "tresor": r.id, "value": t.value as f64 / 1e8, "covered": tresor::payments_covered(&r.params, t.value) });
+            let nr = &mut next.file.tresore[i];
+            nr.utxo = t;
+            nr.retry_after = None;
+            nr.last_error = None;
+            nr.push(tresor_hist(&b.now, "topup", &built));
+            Ok(Done { built, next, info })
+        }
+        Action::TresorCancel { tresor: id } => {
+            let i = own_tresor(&b.file, id, &me)?;
+            let r = &b.file.tresore[i];
+            let built = tresor::cancel(&r.params, &r.utxo, who, net)?;
+            let back: u64 = built.tx.outputs.iter().map(|o| o.value).sum();
+            let info = serde_json::json!({ "tresor": r.id, "kas": back as f64 / 1e8 });
+            let nr = &mut next.file.tresore[i];
+            nr.ended = Some(b.now.clone());
+            nr.push(tresor_hist(&b.now, "cancel", &built));
+            Ok(Done { built, next, info })
+        }
+        _ => Err("Diese Aktion wird aus dem GHOST-Zustand gebaut, nicht aus der Tresor-Datei".into()),
     }
 }
 
@@ -425,25 +665,25 @@ struct Measured {
     built: Built,
 }
 
-fn measure(d: &Deployment, a: &Action, user: &[u8], funding: &[(TransactionOutpoint, UtxoEntry)], prefix: Prefix, net: &Params) -> Result<Measured, String> {
+fn measure<B: Basis>(d: &B, a: &Action, user: &[u8], funding: &[(TransactionOutpoint, UtxoEntry)], prefix: Prefix, net: &Params) -> Result<Measured, String> {
     let mk = wallet::mirror_key();
     let mx = wallet::mirror_x_of(&mk);
     if user == mx.as_slice() {
         return Err("Diese Adresse ist der Ersatzschlüssel der Messkopie und kann nicht signieren".into());
     }
-    let md = mirror_dep(d, user, &mx);
+    let md = d.mirror(user, &mx);
     let mspk = p2pk_spk(&mx);
     let mf = Funds::new(mk, funding.iter().map(|(o, e)| (*o, UtxoEntry::new(e.amount, mspk.clone(), e.block_daa_score, e.is_coinbase, None))).collect());
     let user = user.to_vec();
     let sub = move |x: &[u8]| if x == user.as_slice() { mx.clone() } else { x.to_vec() };
-    let done = run_action(&md, a, Signer::Key(mk), &mf, prefix, net, &sub)?;
+    let done = md.run(a, Signer::Key(mk), &mf, prefix, net, &sub)?;
     let b = done.built;
     Ok(Measured { budgets: b.budgets.clone(), fee: b.fee - b.donated, used_units: b.used_units.clone(), built: b })
 }
 
-fn build_real(d: &Deployment, a: &Action, user: &[u8; 32], funding: &[(TransactionOutpoint, UtxoEntry)], prefix: Prefix, net: &Params, fill: WalletFill) -> Result<(Done, WalletBuilt), String> {
+fn build_real<B: Basis>(d: &B, a: &Action, user: &[u8; 32], funding: &[(TransactionOutpoint, UtxoEntry)], prefix: Prefix, net: &Params, fill: WalletFill) -> Result<(Done<B>, WalletBuilt), String> {
     let f = Funds::new(Signer::Wallet(*user), funding.to_vec());
-    let (r, wb) = with_wallet_fill(fill, || run_action(d, a, Signer::Wallet(*user), &f, prefix, net, &|x: &[u8]| x.to_vec()));
+    let (r, wb) = with_wallet_fill(fill, || d.run(a, Signer::Wallet(*user), &f, prefix, net, &|x: &[u8]| x.to_vec()));
     let done = r?;
     if !wb.used || wb.inputs.is_empty() {
         return Err("Aktion ohne Wallet-Signatur gebaut".into());
@@ -536,13 +776,7 @@ impl ActionPlan {
     /// Namen genannt (Orakel, Factory, GHOST-Wurzel, Vault, Minter-Zweig,
     /// GHOST-Token, Pool) statt nur „Vertrag (Covenant)“
     pub fn describe_outputs_in(&self, d: Option<&Deployment>, prefix: Prefix) -> Vec<serde_json::Value> {
-        let Ok((tx, _)) = from_safe(&self.tx) else { return vec![] };
-        let own = p2pk_spk(&self.owner);
-        let kas = |v: u64| {
-            let s = format!("{:.8}", v as f64 / 1e8);
-            let s = s.trim_end_matches('0').trim_end_matches('.').replace('.', ",");
-            format!("{s} KAS")
-        };
+        let kas = kas_text;
         let covenant_name = |o: &TransactionOutput| -> String {
             let Some(d) = d else { return "Vertrag (Covenant)".into() };
             let cov = o.covenant.as_ref().map(|c| c.covenant_id).unwrap_or_default();
@@ -588,6 +822,31 @@ impl ActionPlan {
             }
             "Vertrag (Covenant)".into()
         };
+        self.describe_with(prefix, &covenant_name)
+    }
+
+    /// Wie `describe_outputs_in` für Tresor-Aktionen, mit der Tresor-Datei:
+    /// „Dein Tresor – N KAS, zahlt X KAS monatlich am 1. an kaspa:…“
+    pub fn describe_tresor_outputs(&self, f: Option<&TresorFile>, prefix: Prefix) -> Vec<serde_json::Value> {
+        let pays = |amount: i64, p: &TresorParams| format!("zahlt {} {} an {}", kas_text(amount as u64), tresor::interval_text(p), address_of_xonly(&p.recipient, prefix));
+        let covenant_name = |o: &TransactionOutput| -> String {
+            if let Action::TresorOpen { to, amount, anchor_day, period_ms, .. } = &self.action {
+                let p = TresorParams { owner: vec![], recipient: vec![], amount: *amount, anchor_day: *anchor_day, period_ms: *period_ms, max_fee: 0, payload_hash: vec![] };
+                return format!("Dein neuer Tresor – {}, zahlt {} {} an {}", kas_text(o.value), kas_text(*amount as u64), tresor::interval_text(&p), to.trim());
+            }
+            let cov = o.covenant.as_ref().map(|c| c.covenant_id).unwrap_or_default();
+            match f.and_then(|f| f.tresore.iter().find(|r| r.utxo.cov == cov)) {
+                Some(r) if r.params.owner == self.owner => format!("Dein Tresor {} – {}, {}", r.id, kas_text(o.value), pays(r.params.amount, &r.params)),
+                Some(r) => format!("Tresor {} (läuft weiter)", r.id),
+                None => "Vertrag (Covenant)".into(),
+            }
+        };
+        self.describe_with(prefix, &covenant_name)
+    }
+
+    fn describe_with(&self, prefix: Prefix, covenant_name: &dyn Fn(&TransactionOutput) -> String) -> Vec<serde_json::Value> {
+        let Ok((tx, _)) = from_safe(&self.tx) else { return vec![] };
+        let own = p2pk_spk(&self.owner);
         tx.outputs
             .iter()
             .enumerate()
@@ -595,7 +854,13 @@ impl ActionPlan {
                 let what = if o.covenant.is_some() {
                     covenant_name(o)
                 } else if o.script_public_key == own {
-                    if Some(i as u32) == self.change_index { "Wechselgeld an die Wallet".into() } else { "an die Wallet".into() }
+                    if Some(i as u32) == self.change_index {
+                        "Wechselgeld an die Wallet".into()
+                    } else if matches!(self.action, Action::TresorCancel { .. }) {
+                        "Rest des Tresors zurück an die Wallet".into()
+                    } else {
+                        "an die Wallet".into()
+                    }
                 } else {
                     "andere Adresse".to_string()
                 };
@@ -611,6 +876,13 @@ impl ActionPlan {
     }
 }
 
+/// Betrag in KAS mit Komma, ohne überflüssige Nullen („1,5 KAS“)
+fn kas_text(v: u64) -> String {
+    let s = format!("{:.8}", v as f64 / 1e8);
+    let s = s.trim_end_matches('0').trim_end_matches('.').replace('.', ",");
+    format!("{s} KAS")
+}
+
 struct Planned {
     plan: ActionPlan,
     /// angeforderte Gebühr der Messkopie
@@ -618,8 +890,8 @@ struct Planned {
     info: serde_json::Value,
 }
 
-fn plan_with_funding(
-    d: &Deployment,
+fn plan_with_funding<B: Basis>(
+    d: &B,
     a: &Action,
     address: &str,
     network: &str,
@@ -629,8 +901,11 @@ fn plan_with_funding(
 ) -> Result<Planned, String> {
     let owner = xonly_of_address(address, prefix)?;
     let user: [u8; 32] = owner.as_slice().try_into().map_err(|_| "Adresse: Schlüssel nicht 32 Byte")?;
-    if funding.is_empty() {
+    if funding.is_empty() && a.needs_funding() {
         return Err(format!("keine KAS auf {address} (Gebühr und Einlagen kommen aus der Wallet)"));
+    }
+    if !funding.is_empty() && !a.needs_funding() {
+        return Err("Diese Aktion nimmt keine eigenen KAS (die Gebühr kommt aus dem Vertrag)".into());
     }
     if funding.len() > MAX_WALLET_INPUTS {
         return Err(format!("höchstens {MAX_WALLET_INPUTS} eigene UTXOs je Tx"));
@@ -640,7 +915,7 @@ fn plan_with_funding(
         return Err("Eingänge für Gebühr/Einlagen müssen normale KAS dieser Adresse sein".into());
     }
     let m = measure(d, a, &owner, funding, prefix, net)?;
-    let fill = WalletFill { budgets: m.budgets.clone(), fee: m.fee, sigs: vec![] };
+    let fill = WalletFill { budgets: m.budgets.clone(), fee: m.fee, sigs: vec![], paid: m.built.fee };
     let (done, wb) = build_real(d, a, &user, funding, prefix, net, fill)?;
     same_shape(&m.built, &done.built)?;
     // Jeder zu signierende P2PK-Eingang muss der Adresse gehören
@@ -676,8 +951,8 @@ fn plan_with_funding(
 
 /// Plan bauen: unsignierte Tx für die Wallet (sendet nichts, schreibt nichts).
 /// `utxos` = UTXOs der Adresse vom Node.
-pub fn build_plan(
-    d: &Deployment,
+pub fn build_plan<B: Basis>(
+    d: &B,
     a: &Action,
     address: &str,
     network: &str,
@@ -686,7 +961,7 @@ pub fn build_plan(
     net: &Params,
 ) -> Result<(ActionPlan, serde_json::Value), String> {
     let owner = xonly_of_address(address, prefix)?;
-    let funding = select_funding(&owner, utxos);
+    let funding = if a.needs_funding() { select_funding(&owner, utxos) } else { vec![] };
     let p = plan_with_funding(d, a, address, network, &funding, prefix, net)?;
     Ok((p.plan, p.info))
 }
@@ -709,11 +984,11 @@ pub fn plan_funding(plan: &ActionPlan, prefix: Prefix) -> Result<Vec<(Transactio
 
 // ------------------------------------------------------------- Submit ----
 
-pub struct Submitted {
+pub struct Submitted<N = Deployment> {
     /// fertige, lokal geprüfte Tx (nur wenn alles gültig ist)
     pub built: Option<Built>,
     /// Folgezustand bei Annahme (für das Journal)
-    pub next: Option<Deployment>,
+    pub next: Option<N>,
     pub report: Report,
     pub info: serde_json::Value,
 }
@@ -761,7 +1036,7 @@ pub fn precheck(plan: &ActionPlan, signed: &SafeTx, network: &str, prefix: Prefi
 /// Wallet-Antwort übernehmen. Err = Plan unbrauchbar (veraltet, verändert,
 /// falsches Netz); Ok mit `built: None` = Signatur der Wallet ungültig
 /// (Grund im Bericht).
-pub fn submit(d: &Deployment, plan: &ActionPlan, signed: &SafeTx, network: &str, prefix: Prefix, net: &Params) -> Result<Submitted, String> {
+pub fn submit<B: Basis>(d: &B, plan: &ActionPlan, signed: &SafeTx, network: &str, prefix: Prefix, net: &Params) -> Result<Submitted<B>, String> {
     if plan.kind != ACTION_PLAN_KIND {
         return Err("kein Aktionsplan".into());
     }
@@ -820,8 +1095,8 @@ pub fn submit(d: &Deployment, plan: &ActionPlan, signed: &SafeTx, network: &str,
 
 /// Mit den Signaturen der Wallet bauen, Budgets nachmessen, prüfen wie der Konsens
 #[allow(clippy::too_many_arguments)]
-fn finish(
-    d: &Deployment,
+fn finish<B: Basis>(
+    d: &B,
     plan: &ActionPlan,
     user: &[u8; 32],
     funding: &[(TransactionOutpoint, UtxoEntry)],
@@ -831,9 +1106,9 @@ fn finish(
     prefix: Prefix,
     net: &Params,
     rep: &mut Report,
-) -> Result<Done, String> {
+) -> Result<Done<B>, String> {
     for round in 0..2 {
-        let fill = WalletFill { budgets: budgets.clone(), fee: fee_req, sigs: sigs.clone() };
+        let fill = WalletFill { budgets: budgets.clone(), fee: fee_req, sigs: sigs.clone(), paid: plan.fee };
         let (done, _) = build_real(d, &plan.action, user, funding, prefix, net, fill)?;
         let tx = &done.built.tx;
         let ue = &done.built.entries;
