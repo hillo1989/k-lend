@@ -2675,6 +2675,22 @@ fn rate_restart(file: &RateFile<'_>) {
 /// (A11-O-1, A11-O-9).
 /// Some((neuer Zins % p. a., Begründung)), wenn eine Änderung fällig ist.
 fn rate_plan(round: &Ctx, d: &Deployment, market: i64, now: &str) -> Option<(f64, String)> {
+    // Grundzins zuerst: liegt der Zins darunter, in Vertragsschritten anheben
+    // (höchstens einmal je Stunde, unabhängig von Kurs und Pool-Liquidität)
+    let cur = apr_of(d.oracle.state.stable_rate);
+    if let Some(next) = math::rate_floor_step(cur) {
+        return match rate_log(round, |l| l.wait_secs(unix_now())) {
+            Ok(0) => Some((next, format!("Grundzins {:.1} % p. a.: Zins {cur:.2} % → {next:.2} % p. a.", math::RATE_MIN_PCT))),
+            Ok(s) => {
+                say!("[{now}] Zinsregel: Zins {cur:.2} % liegt unter dem Grundzins {:.1} % – nächster Schritt in {} min", math::RATE_MIN_PCT, s.div_ceil(60));
+                None
+            }
+            Err(e) => {
+                eprintln!("[{now}] Zinsregel: {e} – keine Zinsänderung");
+                None
+            }
+        };
+    }
     let pool = d.pool.as_ref().map(|p| (p.kas(), p.ghost()));
     let g = match rate::measure(pool, d.pool_unresolved.as_deref(), market) {
         Ok(g) => g,

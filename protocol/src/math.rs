@@ -188,9 +188,24 @@ pub fn keeper_burn(coll: i64, s: &VaultState, oracle_price: i64, market_price: i
 /// Zinsregel des Agenten (Version 3), in % p. a.: Liegt GHOST unter 0,995 USD,
 /// steigt der Zins um RATE_STEP_PCT (Schulden werden teurer, Schuldner kaufen
 /// GHOST und tilgen), über 1,005 USD sinkt er (Prägen lohnt sich wieder).
-/// Grenzen 0 … RATE_MAX_PCT. None = unverändert lassen.
+/// Grenzen RATE_MIN_PCT … RATE_MAX_PCT. None = unverändert lassen.
 pub const RATE_STEP_PCT: f64 = 0.5;
 pub const RATE_MAX_PCT: f64 = 20.0;
+/// Grundzins (Entscheidung des Betreibers 06.10.2026): Die Regel senkt nie
+/// darunter. Liegt der Zins darunter (Start mit 0 %), hebt `rate_floor_step`
+/// ihn in Vertragsschritten (0,5 Punkte, höchstens einmal je Stunde) an.
+pub const RATE_MIN_PCT: f64 = 2.0;
+
+/// Nächster Schritt zum Grundzins, wenn der Zins darunter liegt (unabhängig vom
+/// GHOST-Kurs und von der Pool-Liquidität). None = Grundzins erreicht.
+pub fn rate_floor_step(current_pct: f64) -> Option<f64> {
+    if !current_pct.is_finite() || current_pct >= RATE_MIN_PCT - 1e-9 {
+        return None;
+    }
+    let cur = (current_pct.max(0.0) / RATE_STEP_PCT).round() * RATE_STEP_PCT;
+    let next = (cur + RATE_STEP_PCT).min(RATE_MIN_PCT);
+    ((next - current_pct).abs() > 1e-9).then_some(next)
+}
 pub fn rate_next(current_pct: f64, ghost_usd: f64) -> Option<f64> {
     if !ghost_usd.is_finite() || ghost_usd <= 0.0 || !current_pct.is_finite() {
         return None;
@@ -202,7 +217,11 @@ pub fn rate_next(current_pct: f64, ghost_usd: f64) -> Option<f64> {
     let next = if ghost_usd < 0.995 {
         (cur + RATE_STEP_PCT).min(RATE_MAX_PCT)
     } else if ghost_usd > 1.005 {
-        (cur - RATE_STEP_PCT).max(0.0)
+        // nie unter den Grundzins; liegt er schon darunter, hebt rate_floor_step an
+        if cur <= RATE_MIN_PCT + 1e-9 {
+            return None;
+        }
+        (cur - RATE_STEP_PCT).max(RATE_MIN_PCT)
     } else {
         return None;
     };
@@ -296,6 +315,14 @@ mod keeper_tests {
         assert_eq!(rate_next(3.0, 1.004), None);
         assert_eq!(rate_next(3.0, 1.02), Some(2.5));
         assert_eq!(rate_next(0.0, 1.02), None, "nicht unter 0");
+        assert_eq!(rate_next(2.5, 1.02), Some(2.0));
+        assert_eq!(rate_next(2.0, 1.02), None, "nicht unter den Grundzins");
+        assert_eq!(rate_next(1.0, 1.02), None, "unter dem Grundzins nicht weiter runter");
+        assert_eq!(rate_floor_step(0.0), Some(0.5));
+        assert_eq!(rate_floor_step(1.5), Some(2.0));
+        assert_eq!(rate_floor_step(1.8), Some(2.0));
+        assert_eq!(rate_floor_step(2.0), None);
+        assert_eq!(rate_floor_step(5.0), None);
         assert_eq!(rate_next(20.0, 0.5), None, "nicht über 20 %");
         assert_eq!(rate_next(19.8, 0.5), Some(20.0));
         assert_eq!(rate_next(1.0, f64::NAN), None);

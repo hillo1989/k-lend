@@ -222,8 +222,8 @@ export function Vault() {
           decimals={2}
           invalid={aprBps === null}
           hint={tr(
-            "Startet mit dem aktuellen Satz des Orakels. Der GHOST-Agent passt ihn höchstens stündlich an, nach dem Median seiner Kursmessungen der letzten Stunde: unter 0,995 USD je GHOST +0,5 Prozentpunkte, über 1,005 USD −0,5, zwischen 0 und 20 %.",
-            "Starts with the oracle's current rate. The GHOST agent adjusts it at most hourly, by the median of its price measurements over the last hour: below 0.995 USD per GHOST +0.5 percentage points, above 1.005 USD −0.5, between 0 and 20 %.",
+            "Startet mit dem aktuellen Satz des Orakels. Der GHOST-Agent passt ihn höchstens stündlich an, nach dem Median seiner Kursmessungen der letzten Stunde: unter 0,995 USD je GHOST +0,5 Prozentpunkte, über 1,005 USD −0,5, zwischen 2 % (Grundzins) und 20 %.",
+            "Starts with the oracle's current rate. The GHOST agent adjusts it at most hourly, by the median of its price measurements over the last hour: below 0.995 USD per GHOST +0.5 percentage points, above 1.005 USD −0.5, between 2 % (base rate) and 20 %.",
           )}
         />
         <p className="muted small">
