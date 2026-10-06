@@ -1,0 +1,40 @@
+[package]
+name = "kaspa-lending-protocol"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+silverscript-lang = { path = "../vendor/silverscript/silverscript-lang" }
+silverscript-abi = { path = "../vendor/silverscript/silverscript-abi" }
+# gleiche rusty-kaspa-Revision wie vendor/silverscript/Cargo.toml
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-txscript-errors = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+secp256k1 = { version = "0.29.0", features = ["global-context", "rand-std", "serde"] }
+rand = "0.8.5"
+sha2 = "0.10"
+blake2b_simd = "1.0.2"
+# verschlüsselte Nachrichten im Payload (src/message.rs); offline aus dem Cache
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+faster-hex = "0.10"
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "a41a333b08848f41bf737b72592e463a6011b8ac" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+clap = { version = "4.5", features = ["derive"] }
+ureq = { version = "2", features = ["json"] }
+# Kalender für Daueraufträge (Monatsende, Schaltjahr); steht schon im Lockfile
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+
+[dev-dependencies]
+# angehaltene Uhr für die Takt-Tests des Agenten (tokio::test(start_paused)),
+# gleiche Crate, nur ein Feature mehr; das Programm selbst bleibt unverändert
+tokio = { version = "1", features = ["test-util"] }
+
+[workspace]

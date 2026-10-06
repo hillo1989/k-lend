@@ -1,0 +1,10 @@
+#!/bin/zsh
+# Kurzaufruf für das GHOST-Kommandozeilenwerkzeug (Version 3).
+# Version 2 abbauen: bin/ghostctl-v2 mit deployments/mainnet-v2.json (GHOST-Umzug-v3.command).
+# Baut es neu, wenn Quellen neuer sind als das Programm (Audit 4 F13).
+cd "$(dirname "$0")"
+BIN=vendor/silverscript/target/debug/ghostctl
+if [ ! -x "$BIN" ] || [ -n "$(find protocol/src contracts protocol/Cargo.toml -newer "$BIN" -print -quit 2>/dev/null)" ]; then
+  (cd protocol && cargo build -q --bin ghostctl) >&2 || exit 1
+fi
+exec "$BIN" "$@"

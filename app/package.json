@@ -1,0 +1,29 @@
+{
+  "name": "kaspa-lending-app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Lending-Seite für den GHOST-Stablecoin und den (geplanten) KAS-Pool auf Kaspa L1",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && vite build",
+    "preview": "vite preview",
+    "start": "node server/prod.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fontsource-variable/rubik": "^5.3.0",
+    "qrcode-generator": "^2.0.4",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
+  }
+}

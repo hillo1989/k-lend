@@ -1,0 +1,386 @@
+pragma silverscript ^0.1.0; // Sprachversion des Compilers v1.0.0 ist 0.1.0 (compiler/mod.rs:55)
+
+// StableVault Version 3 — ein Vault je Nutzer: KAS-Sicherheit gegen geprägte GHOST.
+//
+// Sicherheit  = KAS-Betrag dieser UTXO (sompi).
+// Schuld      = debt: genau die geprägten und noch nicht getilgten GHOST.
+//               Sie wächst nicht mit dem Zins. So gibt es nie mehr Schuld als
+//               GHOST (Version 2 buchte den Zins als GHOST-Schuld, für die nie
+//               GHOST entstanden – der letzte Schuldner hätte nie tilgen können).
+// Zins        = interest: aufgelaufener Zins in USD × 1e8 (1 GHOST ≙ 1 USD).
+//               Schuld und offener Zins wachsen mit dem Zinsindex des Orakels
+//               (stableIndex) ab indexAt (Zinseszins, Audit 11 A11-V-5) und
+//               werden beim Schließen in KAS an die Zinskasse (treasury)
+//               bezahlt. Für Mindest- und Liquidationsquote zählt debt + Zins.
+// Rücknahme   = redeem: Jeder darf GHOST an einem Vault ab der
+//               Liquidationsschwelle zurückgeben und bekommt KAS im Wert von
+//               1 USD je GHOST abzüglich REDEEM_FEE_BPS (bleibt im Vault).
+//               Das setzt eine Untergrenze für den GHOST-Kurs. Mindestens
+//               MIN_REDEEM oder die ganze Schuld (Audit 11 A11-V-3).
+// Prägen      = über einen eigenen KCC20-Minter-Zweig, der der Covenant-ID
+//               dieses Vaults gehört.
+//
+// WICHTIG: KCC20 prüft bei einem Minter-Zweig mit Covenant-ID-Besitzer nur,
+// dass dieser Vault in der Tx vorkommt, und die Mengenerhaltung entfällt, wenn
+// der Minter-Zweig Leader ist (vendor/.../examples/kcc20.sil). Deshalb prüft
+// JEDE Funktion hier die komplette GHOST-Seite der Tx: entweder "kein GHOST
+// beteiligt" oder die genau erwartete Gruppe.
+//
+// Einheiten: sompi (1e8 je KAS), GHOST-Einheiten (1e8 je GHOST),
+//            kasUsd = USD je KAS × 1e8, stableIndex × 1e9, Quoten in bps.
+
+contract StableVault(
+    byte[32] oracleCovId,
+    int oraclePrefixLen, int oracleSuffixLen, byte[32] oracleTemplateHash,
+    byte[32] ghostCovId,
+    int ghostPrefixLen, int ghostSuffixLen, byte[32] ghostTemplateHash,
+    int mcrBps,
+    int liqBps,
+    int bonusBps,
+    int maxDebt,
+    byte[32] treasury,
+    byte[32] initOwner, int initDebt, int initInterest, int initIndexAt
+) {
+    byte[32] owner = initOwner;
+    int debt = initDebt;
+    int interest = initInterest;
+    int indexAt = initIndexAt;
+
+    struct OracleState {
+        int kasUsd;
+        int oracleDaa;
+        int seq;
+        int stableRate;
+        int stableIndex;
+    }
+
+    struct GhostState {
+        byte[32] ownerIdentifier;
+        byte identifierType;
+        int amount;
+        bool isMinter;
+    }
+
+    byte constant IDENTIFIER_COVENANT_ID = 0x02;
+    int constant BPS = 10000;
+    int constant PRICE_SCALE = 100000000;
+    int constant INDEX_SCALE = 1000000000;
+    // Zinswachstum je Abrechnung höchstens Index ×10 (growth ≤ 9·1e9)
+    int constant MAX_GROWTH = 9000000000;
+    // Obergrenzen, innerhalb derer die Rechnungen unten nicht überlaufen
+    int constant MAX_COLLATERAL = 10000000000000000;   // 1e8 KAS
+    int constant MAX_DEBT = 100000000000000000;        // 1e9 GHOST
+    int constant MAX_INTEREST = 100000000000000000;    // 1e9 USD
+    // Rücknahme: so viel bleibt als Ausgleich beim Vault-Besitzer (1 %). Liegt
+    // über der Nachführschwelle des Orakels (0,5 %), damit sich eine Rücknahme
+    // gegen ein leicht nachlaufendes Orakel nicht lohnt (Audit 11 A11-V-2)
+    int constant REDEEM_FEE_BPS = 100;
+    // kleinste Rücknahme (1 GHOST), außer der ganzen Schuld: sonst bewegt jeder
+    // mit Kleinstbeträgen fremde Vaults und sperrt deren Besitzer aus
+    int constant MIN_REDEEM = 100000000;
+    // Netzgebühr, die eine Auflösung zugunsten der Zinskasse tragen darf (0,1 KAS;
+    // gemessen kostet die sweep-Tx ≈ 0,055 KAS, weil der Vault-Eingang das ganze
+    // Skript trägt – so muss der Auslöser nichts drauflegen)
+    int constant SWEEP_FEE = 10000000;
+    // Reste unter 0,2 KAS gehen bei Liquidation ganz an den Liquidator (KIP-9)
+    int constant DUST = 20000000;
+    int constant MAX_GHOST_INS = 3;
+    int constant MAX_GHOST_OUTS = 2;
+
+    // MATH-BEGIN (wird von protocol/tests/vault_math_tests.rs herausgelöst)
+
+    // floor(a·b/d) für a,b,d ≥ 0; überläuft nicht, solange (a/d)·b und d·b in i64 passen
+    function mulDivDown(int a, int b, int d): int {
+        // Hinweis: "return (a / d) * b" parst SilverScript als Tupel-Rückgabe (a / d)
+        int res = (a / d) * b + (a % d) * b / d;
+        return res;
+    }
+
+    // ceil(a·b/d), gleiche Bedingungen
+    function mulDivUp(int a, int b, int d): int {
+        int rest = (a % d) * b;
+        int res = (a / d) * b + (rest + d - 1) / d;
+        return res;
+    }
+
+    // Zinswachstum vom Index `from` bis `to` × 1e9: ⌈(to − from)·1e9/from⌉,
+    // exakt für from ≤ 9,2e12 (Teilprodukte wie früher sharesFor), gedeckelt
+    // auf MAX_GROWTH (Index ×10). Der Deckel verhindert, dass ein lange
+    // unberührter Vault an einem Überlauf festsitzt.
+    function growth(int from, int to): int {
+        int delta = to - from;
+        int q = delta / from;
+        int g = MAX_GROWTH;
+        if (q < 9) {
+            int r = delta % from;
+            int t = r * 1000;
+            int t1 = t / from;
+            int t2 = t % from;
+            int low = t2 * 1000000;
+            int up = low % from > 0 ? 1 : 0;
+            g = q * INDEX_SCALE + t1 * 1000000 + low / from + up;
+            if (g > MAX_GROWTH) {
+                g = MAX_GROWTH;
+            }
+        }
+        return g;
+    }
+
+    // Zins auf die Schuld d vom Index `from` bis `to`: ⌈d·growth/1e9⌉, 0 ohne
+    // Schuld oder ohne Zuwachs. Überlauffrei: (d/1e9)·g ≤ 9e17, (d%1e9)·g < 9e18.
+    function accrual(int d, int from, int to): int {
+        int add = 0;
+        if (d > 0 && to > from && from > 0) {
+            add = mulDivUp(d, growth(from, to), INDEX_SCALE);
+        }
+        return add;
+    }
+
+    // MATH-END
+
+    // Zins bis zum Orakelindex `index`: interest + (debt + interest)·(index −
+    // indexAt)/indexAt, aufgerundet (zugunsten der Kasse). Offener Zins
+    // verzinst sich mit, so hängt das Ergebnis nicht davon ab, wie oft
+    // abgerechnet wird. Überlauffrei: debt + interest ≤ 2e17.
+    function accrued(int index): int {
+        int total = interest + accrual(debt + interest, indexAt, index);
+        return total;
+    }
+
+    // Zinsgebühr in sompi zum Preis kasUsd, aufgerundet, höchstens die Sicherheit
+    function interestFee(int index, int kasUsd): int {
+        int fee = mulDivUp(accrued(index), PRICE_SCALE, kasUsd);
+        if (fee > collateral()) {
+            fee = collateral();
+        }
+        return fee;
+    }
+
+    // Ausgang an die Zinskasse: fest der Ausgang direkt hinter dem eigenen
+    // Eingang. So können sich zwei Vaults in einer Tx nie einen Kassen-Ausgang
+    // teilen (Audit 11 A11-V-1: die Kasse bekam sonst nur die größte Gebühr).
+    function payTreasury(int fee) {
+        int idx = this.activeInputIndex + 1;
+        byte[36] kasse = new ScriptPubKeyP2PK(pubkey(treasury));
+        require(tx.outputs[idx].scriptPubKey == byte[](kasse));
+        require(tx.outputs[idx].value >= fee);
+    }
+
+    // Sicherheit·Preis ≥ (Schuld + Zins)·Quote (nichts offen ist immer gesund)
+    function healthy(int coll, int owed, int kasUsd, int ratioBps): bool {
+        int value = mulDivDown(coll, kasUsd, PRICE_SCALE);
+        int need = mulDivUp(owed, ratioBps, BPS);
+        return owed == 0 || value >= need;
+    }
+
+    function collateral(): int {
+        return tx.inputs[this.activeInputIndex].value;
+    }
+
+    function continueWith(int value, int newDebt, int newInterest, int newIndexAt) {
+        require(value > 0);
+        require(value <= MAX_COLLATERAL);
+        require(newDebt >= 0);
+        require(newDebt <= MAX_DEBT);
+        require(newInterest >= 0);
+        require(newInterest <= MAX_INTEREST);
+        require(OpAuthOutputCount(this.activeInputIndex) == 1);
+        int outIdx = OpAuthOutputIdx(this.activeInputIndex, 0);
+        require(tx.outputs[outIdx].value == value);
+        validateOutputState(outIdx, State { owner: owner, debt: newDebt, interest: newInterest, indexAt: newIndexAt });
+    }
+
+    function readOracle(int oracleIdx): (int, int) {
+        require(OpInputCovenantId(oracleIdx) == oracleCovId);
+        OracleState o = readInputStateWithTemplate(oracleIdx, oraclePrefixLen, oracleSuffixLen, oracleTemplateHash);
+        require(o.kasUsd > 0);
+        return (o.kasUsd, o.stableIndex);
+    }
+
+    function noGhost() {
+        require(OpCovInputCount(ghostCovId) == 0);
+        require(OpCovOutputCount(ghostCovId) == 0);
+    }
+
+    // GHOST-Gruppe prüfen: Input 0 ist der eigene Minter-Zweig (Leader, damit
+    // Menge geändert werden darf), Output 0 ist dessen unveränderte
+    // Fortsetzung, alle anderen Outputs sind gewöhnliche Token.
+    // Rückgabe: Summe Outputs − Summe Inputs (> 0 geprägt, < 0 verbrannt).
+    function ghostDelta(GhostState[] outStates): int {
+        int nIn = OpCovInputCount(ghostCovId);
+        int nOut = OpCovOutputCount(ghostCovId);
+        require(nIn >= 1);
+        require(nIn <= MAX_GHOST_INS);
+        require(nOut >= 1);
+        require(nOut <= MAX_GHOST_OUTS); // nicht nur dem Schleifenwächter des Compilers überlassen (A11-V-7)
+        require(outStates.length == nOut);
+        byte[32] myCov = OpInputCovenantId(this.activeInputIndex);
+        int templateIdx = OpCovInputIdx(ghostCovId, 0);
+        // KAS des Minter-Zweigs bleiben im Zweig (Fix-Review N-11: sonst konnte
+        // ein Dritter per repay die 3 KAS des Zweigs abziehen)
+        require(tx.outputs[OpCovOutputIdx(ghostCovId, 0)].value == tx.inputs[templateIdx].value);
+
+        int totalIn = 0;
+        for(i, 0, nIn, MAX_GHOST_INS) {
+            GhostState s = readInputStateWithTemplate(OpCovInputIdx(ghostCovId, i), ghostPrefixLen, ghostSuffixLen, ghostTemplateHash);
+            if (i == 0) {
+                require(s.isMinter);
+                require(s.identifierType == IDENTIFIER_COVENANT_ID);
+                require(s.ownerIdentifier == myCov);
+            } else {
+                require(!s.isMinter);
+            }
+            totalIn = totalIn + s.amount;
+        }
+
+        int totalOut = 0;
+        for(j, 0, nOut, MAX_GHOST_OUTS) {
+            GhostState o = outStates[j];
+            if (j == 0) {
+                require(o.isMinter);
+                require(o.identifierType == IDENTIFIER_COVENANT_ID);
+                require(o.ownerIdentifier == myCov);
+                require(o.amount == 0);
+            } else {
+                require(!o.isMinter);
+                require(o.amount > 0);
+            }
+            validateOutputStateWithInputTemplate(OpCovOutputIdx(ghostCovId, j), o, templateIdx, ghostPrefixLen, ghostSuffixLen, ghostTemplateHash);
+            totalOut = totalOut + o.amount;
+        }
+        return totalOut - totalIn;
+    }
+
+    // ---------------------------------------------------------------- Einträge
+
+    // Besitzer schießt KAS nach (Audit 1 V-04: nur der Besitzer).
+    entry deposit(sig s) {
+        require(checkSig(s, pubkey(owner)));
+        noGhost();
+        int newColl = tx.outputs[OpAuthOutputIdx(this.activeInputIndex, 0)].value;
+        require(newColl > collateral());
+        continueWith(newColl, debt, interest, indexAt);
+    }
+
+    // Besitzer nimmt KAS heraus; danach muss die Mindestquote halten.
+    entry withdraw(int newColl, int oracleIdx, sig s) {
+        require(checkSig(s, pubkey(owner)));
+        noGhost();
+        require(newColl < collateral());
+        (int kasUsd, int index) = readOracle(oracleIdx);
+        int owedInterest = accrued(index);
+        require(healthy(newColl, debt + owedInterest, kasUsd, mcrBps));
+        continueWith(newColl, debt, owedInterest, index);
+    }
+
+    // Besitzer schließt den schuldenfreien Vault. Der aufgelaufene Zins geht in
+    // KAS (zum Orakelpreis, aufgerundet) an die Zinskasse, der Rest ist frei.
+    // Zins unter 0,2 KAS wird erlassen (kleinere Ausgänge verbietet KIP-9 praktisch).
+    entry close(int oracleIdx, sig s) {
+        require(checkSig(s, pubkey(owner)));
+        noGhost();
+        require(debt == 0);
+        require(OpAuthOutputCount(this.activeInputIndex) == 0);
+        (int kasUsd, int index) = readOracle(oracleIdx);
+        int fee = interestFee(index, kasUsd);
+        if (fee >= DUST) {
+            payTreasury(fee);
+        }
+    }
+
+    // Jeder löst einen schuldenfreien Vault auf, dessen Zins die ganze
+    // Sicherheit aufzehrt: alles bis auf SWEEP_FEE Netzgebühr an die Kasse.
+    // Sonst bliebe er nach einer Liquidation für immer liegen, weil der
+    // Besitzer nichts mehr bekäme (Audit 11 A11-V-4).
+    entry sweep(int oracleIdx) {
+        noGhost();
+        require(debt == 0);
+        require(OpAuthOutputCount(this.activeInputIndex) == 0);
+        (int kasUsd, int index) = readOracle(oracleIdx);
+        int coll = collateral();
+        require(interestFee(index, kasUsd) == coll);
+        payTreasury(coll - SWEEP_FEE);
+    }
+
+    // Besitzer prägt `amount` GHOST an einen frei wählbaren Empfänger.
+    entry mint(int amount, int oracleIdx, GhostState[] outStates, sig s) {
+        require(checkSig(s, pubkey(owner)));
+        require(amount > 0);
+        require(OpCovOutputCount(ghostCovId) == 2);
+        require(ghostDelta(outStates) == amount);
+        (int kasUsd, int index) = readOracle(oracleIdx);
+        int owedInterest = accrued(index);
+        int newDebt = debt + amount;
+        require(healthy(collateral(), newDebt + owedInterest, kasUsd, mcrBps));
+        // Obergrenze je Vault (Mainnet: 50 GHOST) für die geprägte Schuld
+        require(newDebt <= maxDebt);
+        continueWith(collateral(), newDebt, owedInterest, index);
+    }
+
+    // Besitzer tilgt, indem er GHOST verbrennt (Fix-Review N-4: nur der
+    // Besitzer). Der Zins bleibt stehen und wird beim Schließen bezahlt.
+    entry repay(int oracleIdx, GhostState[] outStates, sig s) {
+        require(checkSig(s, pubkey(owner)));
+        int burned = 0 - ghostDelta(outStates);
+        require(burned > 0);
+        require(burned <= debt); // keine Überzahlung, sonst wären GHOST verloren
+        (int kasUsd, int index) = readOracle(oracleIdx);
+        continueWith(collateral(), debt - burned, accrued(index), index);
+    }
+
+    // Rücknahme: Jeder gibt `amount` GHOST zurück (verbrannt) und erhält KAS im
+    // Wert von amount·(1 − REDEEM_FEE_BPS) USD. Nur an Vaults ab der
+    // Liquidationsschwelle (darunter sind Liquidatoren dran); der Vault bleibt
+    // bestehen und behält mindestens DUST.
+    entry redeem(int oracleIdx, int amount, GhostState[] outStates) {
+        require(amount > 0);
+        require(amount <= debt);
+        require(amount >= MIN_REDEEM || amount == debt);
+        require(0 - ghostDelta(outStates) == amount);
+        (int kasUsd, int index) = readOracle(oracleIdx);
+        int owedInterest = accrued(index);
+        int coll = collateral();
+        require(healthy(coll, debt + owedInterest, kasUsd, liqBps));
+        int usd = mulDivDown(amount, BPS - REDEEM_FEE_BPS, BPS);
+        int paid = mulDivDown(usd, PRICE_SCALE, kasUsd);            // sompi
+        require(paid > 0);
+        require(coll - paid >= DUST);
+        continueWith(coll - paid, debt - amount, owedInterest, index);
+    }
+
+    // Jeder darf einen Vault unter der Liquidationsschwelle ablösen: `burn`
+    // GHOST verbrennen (Teil- oder Voll-Liquidation) und dafür KAS im Wert von
+    // burn + Bonus erhalten (Audit 1 V-02). Reicht die Sicherheit nicht, bekommt
+    // der Liquidator alles, der Vault endet, Restschuld und Zins sind ausgebucht.
+    // Bleibt ein Vault übrig, bleibt auch der Zins stehen (für die Zinskasse).
+    entry liquidate(int oracleIdx, int burn, GhostState[] outStates) {
+        (int kasUsd, int index) = readOracle(oracleIdx);
+        int coll = collateral();
+        int owedInterest = accrued(index);
+        require(!healthy(coll, debt + owedInterest, kasUsd, liqBps));
+        require(burn > 0);
+        require(burn <= debt);
+        require(0 - ghostDelta(outStates) == burn);
+
+        int claim = mulDivUp(burn, BPS + bonusBps, BPS);          // USD × 1e8
+        int seize = coll;
+        if (mulDivDown(coll, kasUsd, PRICE_SCALE) > claim) {
+            seize = mulDivUp(claim, PRICE_SCALE, kasUsd);           // sompi, < coll
+        }
+        int rest = coll - seize;
+        if (seize == coll) {
+            // Sicherheit deckt den Anspruch nicht: alles an den Liquidator,
+            // Vault endet, Restschuld uneinbringlich (ausgebucht)
+            require(OpAuthOutputCount(this.activeInputIndex) == 0);
+        } else if (rest < DUST) {
+            // Rest zu klein für eine eigene UTXO: nur bei voller Tilgung
+            require(burn == debt);
+            require(OpAuthOutputCount(this.activeInputIndex) == 0);
+        } else {
+            // Der Zins bleibt stehen: er gehört der Zinskasse und wird beim
+            // Schließen bezahlt (eine anteilige Kürzung liefe bei üblichen
+            // Beträgen über 64 Bit, Test v3_teil_liquidation_laesst_den_zins_stehen)
+            continueWith(rest, debt - burn, owedInterest, index);
+        }
+    }
+}

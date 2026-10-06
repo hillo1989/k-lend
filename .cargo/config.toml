@@ -1,0 +1,4 @@
+# Build-Artefakte mit dem SilverScript-Workspace teilen, damit rusty-kaspa
+# nicht zweimal kompiliert wird (gleiche Cargo.lock, gleiche Versionen).
+[build]
+target-dir = "vendor/silverscript/target"

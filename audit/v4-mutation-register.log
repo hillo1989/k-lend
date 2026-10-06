@@ -1,0 +1,38 @@
+rot     L87 | require(OpAuthOutputCount(this.activeInputIndex) == 1); | keine_zweite_haupt_utxo test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.33s 
+rot     L89 | require(tx.outputs[outIdx].value == myValue()); | register_kas_bleiben_im_register witness_laesst_alles_unveraendert test result: FAILED. 48 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.04s 
+rot     L94 | require(!isTicket); | ticket_wird_nicht_zur_haupt_utxo test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.54s 
+rot     L95 | require(initialized); | witness_initialisiert_nicht test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.56s 
+rot     L100 | require(OpCovInputCount(oracleCov) == 0); | kein_austausch_eintrag_neben_einem_orakel_update test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.27s 
+rot     L106 | require(n >= minSigners); | ankuendigung_prueft_die_grenzen_des_neuen_satzes init_prueft_den_startsatz test result: FAILED. 48 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.05s 
+LUECKE  L107 | require(n <= MAX_SIGNERS);
+rot     L108 | require(t >= minThreshold); | ankuendigung_prueft_die_grenzen_des_neuen_satzes test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.10s 
+rot     L109 | require(2 * t > n); | ankuendigung_prueft_die_grenzen_des_neuen_satzes test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.67s 
+rot     L110 | require(tRot >= t); | ankuendigung_prueft_die_grenzen_des_neuen_satzes test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.94s 
+rot     L111 | require(tRot <= n); | ankuendigung_prueft_die_grenzen_des_neuen_satzes test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.84s 
+LUECKE  L115 | require(keys.length == n);
+LUECKE  L126 | require(sigs.length == need);
+LUECKE  L127 | require(idx.length == need);
+rot     L131 | require(j > last); | absage_mit_preis_schwelle ankuendigung_braucht_austausch_schwelle preis_mit_zu_wenigen_doppelten_oder_falsch_sortierten_signaturen_scheitert test result: FAILED. 47 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.31s 
+LUECKE  L132 | require(j < n);
+rot     L133 | require(checkMsgSig(sigs[k], digest, keys[j])); | absage_signatur_gilt_nur_fuer_diese_nonce preis_mit_fremdem_satz_oder_falschen_schluesseln_scheitert signatur_bindet_ankuendigung_nonce_und_art signatur_bindet_preis_seq_und_orakel test result: FAILED. 46 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.32s 
+rot     L144 | require(!isTicket); | init_nicht_aus_einem_ticket test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.19s 
+rot     L145 | require(!initialized); | init_einmalig_vom_deployer test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.87s 
+rot     L146 | require(checkSig(s, deployer)); | init_einmalig_vom_deployer test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.95s 
+rot     L148 | require(hashSet(n, t, tRot, keys) == setHash); | init_prueft_den_startsatz test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.26s 
+rot     L149 | require(OpCovInputCount(oCov) == 0); | init_mit_orakel_update_scheitert kein_austausch_eintrag_neben_einem_orakel_update test result: FAILED. 48 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.01s 
+rot     L167 | require(hashSet(n, t, tRot, keys) == setHash); | nach_dem_austausch_gilt_nur_der_neue_satz preis_mit_fremdem_satz_oder_falschen_schluesseln_scheitert test result: FAILED. 48 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.11s 
+LUECKE  L173 | require(OpCovOutputCount(oracleCov) == 1);
+rot     L212 | require(tx.daa >= lastDaa + emergAfterDaa); | notfall_erst_nach_langer_stille test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.07s 
+rot     L218 | require(hashSet(n, t, tRot, keys) == auth); | ankuendigung_braucht_austausch_schwelle notfall_nur_durch_den_notfallsatz test result: FAILED. 48 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.17s 
+rot     L221 | require(OpTxPayloadSubstr(0, OpTxPayloadLen()) == ann); | ankuendigung_muss_im_payload_stehen test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.88s 
+rot     L224 | require(OpAuthOutputCount(this.activeInputIndex) == 2); | ankuendigung_ausgaenge_genau_haupt_und_ticket test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.56s 
+rot     L226 | require(tx.outputs[o].value == myValue()); | ankuendigung_ausgaenge_genau_haupt_und_ticket test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.01s 
+rot     L246 | require(hashSet(n, t, tRot, keys) == setHash); | absage_mit_preis_schwelle test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.15s 
+rot     L265 | require(OpInputCovenantId(ticketIdx) == OpInputCovenantId(this.activeInputIndex)); | ticket_muss_von_der_register_covenant_sein test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.96s 
+rot     L267 | require(tk.isTicket); | activate_ohne_ticket_ist_keine_freie_absage test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.07s 
+rot     L268 | require(tk.nonce == nonce); | abgelaufenes_ticket_aktiviert_nicht neue_ankuendigung_entwertet_die_alte notfall_ticket_wartet_emerg_delay_und_verfaellt_durch_update test result: FAILED. 47 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.93s 
+LUECKE  L300 | require(isTicket);
+rot     L301 | require(OpAuthOutputCount(this.activeInputIndex) == 0); | ticket_erzeugt_keine_register_ausgaenge test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.99s 
+rot     L302 | require(OpInputCovenantId(mainIdx) == OpInputCovenantId(this.activeInputIndex)); | ticket_braucht_die_haupt_utxo test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.00s 
+rot     L304 | require(!mn.isTicket); | ticket_braucht_die_haupt_utxo test result: FAILED. 49 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.86s 
+rot     L310 | require(this.ageDaa >= delay); | alleinbetrieb_eins_von_eins_mit_kurzen_fristen austausch_erst_nach_der_wartezeit notfall_ticket_wartet_emerg_delay_und_verfaellt_durch_update test result: FAILED. 47 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.46s 

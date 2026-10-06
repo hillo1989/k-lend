@@ -1,0 +1,67 @@
+rot     L146 | require(OpInputCovenantId(oracleIdx) == oracleCovId); | fremdes_orakel_zaehlt_nicht test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.83s 
+LUECKE  L148 | require(o.kasUsd > 0);
+rot     L149 | require(!(stopWhenFrozen && o.frozen)); | v4_eingefroren_kein_init v4_eingefroren_kein_tausch_wenn_stop_when_frozen test result: FAILED. 34 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.53s 
+rot     L156 | require(rises || productGe(x2, k, y2, lowRef)); | ausserhalb_des_bands_nur_richtung_band init_nur_mit_startkurs_im_band verkaufen_nur_bis_zur_unteren_bandgrenze bandregel_in_pool_rs_gleich_vertrag test result: FAILED. 16 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.48s 
+rot     L157 | require(falls || productGe(y2, highRef, x2, k)); | ausserhalb_des_bands_nur_richtung_band bandregel_in_pool_rs_gleich_vertrag init_nur_mit_startkurs_im_band kaufen_nur_bis_zur_oberen_bandgrenze test result: FAILED. 16 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.55s 
+rot     L162 | require(OpAuthOutputCount(this.activeInputIndex) == 1); | falscher_zustand_der_fortsetzung_scheitert test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.45s 
+rot     L165 | require(newKas >= MIN_KAS); | a10_letzter_einleger_und_1_kas_rest test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.66s 
+rot     L166 | require(newKas <= MAX_KAS); | einlegen_ueber_der_kas_obergrenze_scheitert test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.51s 
+LUECKE  L176 | require(nOut >= 1);
+LUECKE  L177 | require(nOut <= MAX_TOK_OUTS);
+LUECKE  L178 | require(outs.length == nOut);
+rot     L186 | require(mineOut); | init_prueft_anteile_und_reserve zweiter_pool_token_rein_oder_raus_scheitert test result: FAILED. 34 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.77s 
+rot     L187 | require(o.isMinter == poolIsMinter); | minter_status_der_pool_ausgaenge_ist_fest test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.61s 
+rot     L190 | require(!mineOut); | einlegen_mengenerhaltung_der_anteile zweiter_pool_token_rein_oder_raus_scheitert test result: FAILED. 34 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.77s 
+rot     L191 | require(!o.isMinter); | einlegen_mengenerhaltung_der_anteile test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.77s 
+LUECKE  L205 | require(nIn >= 1);
+LUECKE  L206 | require(nIn <= MAX_TOK_INS);
+rot     L209 | require(tx.outputs[OpCovOutputIdx(ghostCovId, 0)].value == tx.inputs[tIn].value); | kas_der_reserve_und_des_minters_bleiben test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.17s 
+rot     L214 | require(!s.isMinter); | minter_als_reserve_scheitert test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.80s 
+rot     L217 | require(mine); | fremder_token_aus_derselben_tx_als_reserve_scheitert test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.81s 
+rot     L218 | require(sameTx(idx)); | geschenkter_token_als_reserve_scheitert test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.71s 
+rot     L221 | require(!mine); | zweiter_pool_token_rein_oder_raus_scheitert test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.70s 
+LUECKE  L225 | require(newReserve > 0);
+rot     L226 | require(newReserve <= MAX_GHOST); | verkauf_ueber_die_ghost_obergrenze_scheitert test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.89s 
+LUECKE  L238 | require(nIn >= 1);
+LUECKE  L239 | require(nIn <= MAX_TOK_INS);
+rot     L242 | require(tx.outputs[OpCovOutputIdx(lpCovId, 0)].value == tx.inputs[mIn].value); | kas_der_reserve_und_des_minters_bleiben test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.68s 
+LUECKE  L250 | require(mine);
+rot     L251 | require(s.isMinter); | a10_gegenprobe_l192_l193_inhaber_als_minter test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.00s 
+rot     L252 | require(sameTx(idx)); | minter_aus_fremder_tx_oder_fehlend_scheitert test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.45s 
+LUECKE  L255 | require(!mine);
+LUECKE  L256 | require(!s.isMinter);
+LUECKE  L261 | require(newTotal > 0);
+rot     L262 | require(newTotal <= MAX_SHARES); | a10_grenzen_max_shares_und_max_reserven test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.39s 
+rot     L263 | require(newTotal - total == holdersOut - holdersIn); | einlegen_mengenerhaltung_der_anteile abziehen_mengenerhaltung_der_anteile test result: FAILED. 34 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.30s 
+LUECKE  L271 | require(id != byte[32](0x0000000000000000000000000000000000000000000000000000000000000000));
+rot     L272 | require(OpCovInputCount(id) == 0); | a10_gegenprobe_l214_init_mit_bestehendem_token test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.87s 
+LUECKE  L274 | require(n <= MAX_OUTPUTS);
+rot     L277 | require(OpOutputCovenantId(i) != id); | init_prueft_anteile_und_reserve test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.81s 
+rot     L288 | require(!initialized); | init_nur_einmal_und_nur_vom_gruender test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.76s 
+rot     L289 | require(checkSig(s, creator)); | init_nur_einmal_und_nur_vom_gruender test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.72s 
+LUECKE  L290 | require(bandBps > 0);
+LUECKE  L291 | require(bandBps <= MAX_BAND_BPS);
+LUECKE  L294 | require(lid != ghostCovId);
+LUECKE  L305 | require(nIn >= 1);
+LUECKE  L306 | require(nIn <= MAX_TOK_INS);
+rot     L309 | require(!t.isMinter); | init_mit_ghost_minter_als_eingang_scheitert test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.78s 
+rot     L310 | require(!(t.identifierType == IDENTIFIER_COVENANT_ID && t.ownerIdentifier == me)); | init_mit_pool_eigenem_ghost_als_eingang_scheitert test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.65s 
+LUECKE  L313 | require(reserve > 0);
+rot     L314 | require(reserve <= MAX_GHOST); | init_ueber_der_ghost_obergrenze_scheitert test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.84s 
+rot     L323 | require(initialized); | nicht_initialisiert_kein_tausch test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.60s 
+rot     L327 | require(total2 == total); | tauschen_laesst_die_anteile_unveraendert test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.69s 
+rot     L328 | require(hIn == 0); | tauschen_laesst_die_anteile_unveraendert test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.73s 
+rot     L338 | require(productGe(xAdj, yAdj, x, y)); | a10_grenzen_max_shares_und_max_reserven test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.68s 
+LUECKE  L346 | require(initialized);
+rot     L350 | require(hIn == 0); | einlegen_ohne_fremde_anteile test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.78s 
+LUECKE  L352 | require(m > 0);
+rot     L354 | require(x2 >= x); | a10_gegenprobe_l291_add_mit_kas_entnahme test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.01s 
+LUECKE  L355 | require(y2 >= y);
+rot     L356 | require(productGe(total, x2 - x, m, x)); | a10_gegenprobe_l291_add_mit_kas_entnahme a10_rechnung_pool_rs_gleich_vertrag_bei_add_und_remove test result: FAILED. 18 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.87s 
+rot     L357 | require(productGe(total, y2 - y, m, y)); | a10_rechnung_pool_rs_gleich_vertrag_bei_add_und_remove test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.09s 
+LUECKE  L364 | require(initialized);
+LUECKE  L369 | require(m > 0);
+LUECKE  L371 | require(x2 <= x);
+LUECKE  L372 | require(y2 <= y);
+rot     L373 | require(productGe(x, m, x - x2, total)); | a10_rechnung_pool_rs_gleich_vertrag_bei_add_und_remove a10_grenzen_max_shares_und_max_reserven test result: FAILED. 18 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.40s 
+rot     L374 | require(productGe(y, m, y - y2, total)); | a10_rechnung_pool_rs_gleich_vertrag_bei_add_und_remove test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.51s 

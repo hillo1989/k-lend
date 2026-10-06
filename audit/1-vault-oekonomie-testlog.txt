@@ -1,0 +1,37 @@
+# Audit-Testlauf 2026-09-28 13:50 — protocol/tests/audit_vault.rs gegen die Skript-Engine (rusty-kaspa a41a333)
+# Aufruf: CARGO_TARGET_DIR=vendor/silverscript/target cargo test --test audit_vault -- --nocapture --test-threads=1
+574 |     let e = env();
+     Running tests/audit_vault.rs (/Users/peterpan/Desktop/Claude/kaspa-lending/vendor/silverscript/target/debug/deps/audit_vault-7d9701938df8f861)
+running 11 tests
+test a1_kcc20_transfer_mit_negativem_ausgang ... A1 KCC20-Transfer 10 -> [+15, -5]: [Ok(())]
+A1 Gegenprobe 10 -> [+7, +3]: [Ok(())]
+A1 ERGEBNIS: negativer Ausgang AKZEPTIERT
+ok
+test a1b_negatives_token_als_repay_input ... A1b repay mit Inputs [+30, -20] als 10 verbucht: [Ok(()), Ok(()), Ok(()), Ok(()), Ok(())]
+A1b ERGEBNIS: AKZEPTIERT (Vault prüft Vorzeichen der Inputs nicht)
+ok
+test a1c_kette_negativ_split_dann_liquidation ... A1c: aus 1 Einheit GHOST wurden 15750000000 Einheiten; damit Liquidation gültig, Angreifer erhält 1000000000000 sompi Sicherheit
+ok
+test a2_liquidation_bei_unterdeckung_ist_verlustgeschaeft ... A2: Liquidator verbrennt 15750000000 Einheiten = 157.50 USD, erhält 1000000000000 sompi = 150.00 USD -> Verlust 7.50 USD; Teilverbrennung abgelehnt
+ok
+test a2b_zone_zwischen_100_und_110_prozent_nimmt_alles ... A2b: Quote 104.8 %: Besitzer verliert 1000000000000 sompi (165.00 USD) für 157.50 USD Schuld; Liquidator-Gewinn nur 7.50 USD (Bonus durch Sicherheit gedeckelt)
+ok
+test a3_zins_ohne_gegenwert_vault_nicht_schliessbar ... A3: Schuld 10500000000 Einheiten; nach Verbrennen aller 100 GHOST bleiben 476190477 Anteile = 500000001 Einheiten; close scheitert; mindestens 25000000050 sompi (250.00 KAS) bleiben gebunden
+ok
+test a4_fremde_tilgung_und_einzahlung_ohne_signatur ... A4: repay(1 Einheit) durch Fremden gültig, Anteile bleiben 10000000000; bis 1 Einheiten je Teiltilgung verfallen; deposit(+1 sompi) durch Fremden gültig
+ok
+test a5_dust_rest_geht_an_liquidator ... A5: coll 433135000000 sompi, seize 433125000000, Rest 10000000 sompi (< DUST 20000000) geht an den Liquidator, Vault endet
+ok
+test a6_minter_zweig_ohne_vault_unbrauchbar ... A6: Minter-Zweig ohne Vault: [Err("VerifyError")]
+ok
+test a7_mint_repay_rundung_kein_leck ... A7: Rundung bei mint/repay stets zugunsten des Protokolls (Referenzrechnung, Engine-Gleichheit in vault_math_tests)
+ok
+test a8_debtof_ueberlauf_bei_max_shares ... A8: debtOf(1e17, 90000000000) [Index 90x]: Ok(())
+A8: debtOf(1e17, 92000000000) [Index 92x]: Ok(())
+A8: debtOf(1e17, 93000000000) [Index 93x]: Err("NumberTooBig(\"Product exceeds 64-bit signed integer range\")")
+A8: debtOf(1e17, 1000000000000) [Index 1000x]: Err("NumberTooBig(\"Product exceeds 64-bit signed integer range\")")
+A8: debtOf(1e17, 9200000000000) [Index 9200x]: Err("NumberTooBig(\"Product exceeds 64-bit signed integer range\")")
+A8: sharesFor(1e12, 9000000000000) [Index 9000x]: Ok(())
+A8: sharesFor(1e12, 9300000000000) [Index 9300x]: Ok(())
+ok
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 50.95s

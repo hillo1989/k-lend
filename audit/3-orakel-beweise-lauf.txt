@@ -1,0 +1,27 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.34s
+     Running tests/audit_oracle.rs (/Users/peterpan/Desktop/Claude/kaspa-lending/vendor/silverscript/target/debug/deps/audit_oracle-a288b218845a960a)
+
+running 5 tests
+test a_fremdes_read_macht_zustandsdatei_und_update_unbrauchbar ...   read() durch Dritten       Inputs  2 | compute   2965 g | transient   4940 g | storage   5850 g | Gebühr  311325 sompi (0.00311 KAS) | ~1014 B
+  Dritter zahlte 311325 sompi Gebühr; Orakel-Outpoint ist jetzt fe0994a88ed677326109440c40288c86813bd1924eb0b3fdd7642663504e1d35:0
+  Komitee-Update auf altem Outpoint: Input 0: UTXO nicht vorhanden (schon ausgegeben?)
+ok
+test b_locktime_domaenenwechsel_wird_von_der_engine_akzeptiert ...   Update mit oracleDaa = 1700000000000 (>= LOCK_TIME_THRESHOLD): Input 0: VerifyError
+  Kontrolle: oracleDaa = 499999999999 (DAA-Domäne, weit in der Zukunft) wird von der Engine akzeptiert; die Tx wäre erst bei diesem DAA-Score final
+ok
+test c_preis_ohne_grenze_kann_vaults_einfrieren ...   Orakel akzeptiert kasUsd = 1
+  Liquidation bei kasUsd=1: Liquidator +149.95 KAS für ~1 GHOST (Sicherheit 150 KAS ≈ 7,16 USD zum echten Kurs)
+  Orakel akzeptiert kasUsd = 1e18 (Vault-Grenze laut ARCHITEKTUR.md: 920 USD/KAS = 9,2e10)
+  repay bei kasUsd=1e18: BAUT (Engine akzeptiert)
+  withdraw bei kasUsd=1e18: Input 0: NumberTooBig("Product exceeds 64-bit signed integer range")
+  liquidate bei kasUsd=1e18: Vault ist gesund, Liquidation nicht erlaubt
+ok
+test d_zinsrechnung_mainnet_konstanten ...   1 Jahr in einem Update: Index 1050000000 (= 5.0000 % p. a.)
+  1 Jahr im 5-min-Takt: Index 1051146166 (= 5.1146 % p. a., Rundungsverlust -1146166 ppb)
+ok
+test e_signiertes_update_ist_inhaberpapier_bis_seq_steigt ...   Dritter hat P1 = 0,04 USD installiert (Tx 06f68935a023b4cd594daa3d1e2e7914d125265a42dbe558e6c8e58fb2a2cd0c)
+  Komitee-Update P2 = 0,03 USD danach: Input 0: UTXO nicht vorhanden (schon ausgegeben?)
+ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.24s
+

@@ -1,0 +1,112 @@
+pragma silverscript ^0.1.0; // Sprachversion des Compilers v1.0.0 ist 0.1.0 (compiler/mod.rs:55)
+
+// PriceOracleV4 — Preis und Zinsindex für GHOST v4 (Entwurf Variante C).
+//
+// Das Orakel prüft KEINE Signaturen. Ein Update ist nur gültig, wenn das
+// Unterzeichner-Register (signer_register_v4.sil, Covenant regCovId) in
+// derselben Tx ausgegeben wird. Das Register prüft das Quorum und verlangt,
+// dass der Orakel-Ausgang genau den signierten Zustand trägt. Alle Einträge
+// des Registers außer attestPrice verbieten einen Orakel-Eingang in der Tx,
+// ein Austausch-Eintrag lässt sich also nicht mit einem Update kombinieren.
+//
+// Das Skript fährt in JEDER Vault- und Pool-Tx mit (read). Es ist deshalb so
+// klein wie möglich gehalten: read und freeze prüfen das Register nicht, weil
+// das Register in keinem Eintrag einen unveränderten bzw. eingefrorenen
+// Orakel-Ausgang zulässt (attestPrice verlangt seq + 1, alle anderen
+// Einträge verbieten den Orakel-Eingang).
+//
+// Frischebremse: Liegt der Preis freezeAfterDaa hinter der Kette, darf jeder
+// das Orakel einfrieren (frozen = true). Vault v4 sperrt dann mint, redeem,
+// liquidate, sweep und withdraw mit Schuld; das nächste Update taut auf. Den
+// Zins für die Pause trägt das nächste Update über Δdaa nach.
+//
+// Einheiten wie risk_oracle.sil (v3):
+//   kasUsd      USD je KAS × 1e8
+//   oracleDaa   DAA-Score des Preises
+//   stableRate  Zins je DAA × 1e18
+//   stableIndex Schuldindex × 1e9
+//   lastRateDaa oracleDaa der letzten Zinsänderung
+contract PriceOracleV4(
+    byte[32] regCovId,
+    int maxRate,          // Obergrenze des Zinssatzes (Vorschlag 20 %/Jahr = 634_195_839)
+    int rateStep,         // größter Zinsschritt je Änderung (Vorschlag 0,5 Punkte = 15_854_896)
+    int rateGapDaa,       // Mindestabstand zweier Zinsänderungen (Vorschlag 1 h = 36_000)
+    int freezeAfterDaa,   // ohne Update so lange → jeder darf einfrieren (Vorschlag 2 h = 72_000)
+    int initKasUsd, int initOracleDaa, int initSeq, int initStableRate, int initStableIndex,
+    bool initFrozen, int initLastRateDaa  // Genesis: false und initOracleDaa
+) {
+    int kasUsd = initKasUsd;
+    int oracleDaa = initOracleDaa;
+    int seq = initSeq;
+    int stableRate = initStableRate;
+    int stableIndex = initStableIndex;
+    bool frozen = initFrozen;
+    int lastRateDaa = initLastRateDaa;
+
+    int constant RATE_SCALE = 1000000000;
+    int constant MIN_UPDATE_GAP_DAA = 600;    // ≈ 1 min bei 10 BPS (wie v3)
+    int constant MIN_KAS_USD = 1000;          // 0,00001 USD
+    int constant MAX_KAS_USD = 90000000000;   // 900 USD
+
+    // Genau eine Fortsetzung, KAS bleiben in der UTXO (wie v3).
+    function continuation(): int {
+        require(OpAuthOutputCount(this.activeInputIndex) == 1);
+        int outIdx = OpAuthOutputIdx(this.activeInputIndex, 0);
+        require(tx.outputs[outIdx].value == tx.inputs[this.activeInputIndex].value);
+        return outIdx;
+    }
+
+    // Jeder darf den Preis nutzen, solange der Zustand unverändert bleibt.
+    entry read() {
+        int outIdx = continuation();
+        validateOutputState(outIdx, State {
+            kasUsd: kasUsd, oracleDaa: oracleDaa, seq: seq, stableRate: stableRate,
+            stableIndex: stableIndex, frozen: frozen, lastRateDaa: lastRateDaa
+        });
+    }
+
+    // Neuer Preis und Zinssatz. Das Register (genau ein Eingang) prüft das
+    // Quorum über (kasUsd, oracleDaa, seq, stableRate) und den Ausgang.
+    entry update(int newKasUsd, int newOracleDaa, int newStableRate) {
+        require(OpCovInputCount(regCovId) == 1);
+        require(newKasUsd >= MIN_KAS_USD);
+        require(newKasUsd <= MAX_KAS_USD);
+        require(newKasUsd * 2 >= kasUsd);
+        require(newKasUsd <= kasUsd * 2);
+        require(newOracleDaa >= oracleDaa + MIN_UPDATE_GAP_DAA);
+        require(tx.daa >= newOracleDaa);
+        require(newStableRate >= 0);
+        require(newStableRate <= maxRate);
+        // Zinsrahmen im Vertrag: höchstens rateStep je Änderung und höchstens
+        // eine Änderung je rateGapDaa – auch ein kolludierendes Quorum bewegt
+        // den Zins nur langsam
+        int rateDaa = lastRateDaa;
+        if (newStableRate != stableRate) {
+            require(newOracleDaa >= lastRateDaa + rateGapDaa);
+            require(newStableRate - stableRate <= rateStep);
+            require(stableRate - newStableRate <= rateStep);
+            rateDaa = newOracleDaa;
+        }
+        // Index wie v3: für den abgelaufenen Zeitraum gilt der ALTE Satz
+        int delta = newOracleDaa - oracleDaa;
+        int growth = stableRate * delta / RATE_SCALE;
+        int newIndex = stableIndex + stableIndex * growth / RATE_SCALE;
+        int outIdx = continuation();
+        validateOutputState(outIdx, State {
+            kasUsd: newKasUsd, oracleDaa: newOracleDaa, seq: seq + 1, stableRate: newStableRate,
+            stableIndex: newIndex, frozen: false, lastRateDaa: rateDaa
+        });
+    }
+
+    // Jeder darf ein veraltetes Orakel einfrieren. Die Locktime beweist, dass
+    // die Kette mindestens bei oracleDaa + freezeAfterDaa steht. Mehrfaches
+    // Einfrieren ist wirkungslos (wie read) und daher nicht verboten.
+    entry freeze() {
+        require(tx.daa >= oracleDaa + freezeAfterDaa);
+        int outIdx = continuation();
+        validateOutputState(outIdx, State {
+            kasUsd: kasUsd, oracleDaa: oracleDaa, seq: seq, stableRate: stableRate,
+            stableIndex: stableIndex, frozen: true, lastRateDaa: lastRateDaa
+        });
+    }
+}

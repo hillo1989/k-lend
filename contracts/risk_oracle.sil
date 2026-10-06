@@ -1,0 +1,120 @@
+pragma silverscript ^0.1.0; // Sprachversion des Compilers v1.0.0 ist 0.1.0 (compiler/mod.rs:55)
+
+// RiskOracle — Singleton-Zustand mit KAS/USD-Preis und GHOST-Zinsindex.
+//
+// Nur die Spitze der Covenant-Kette zählt: Ein Vertrag kann das Alter eines
+// signierten Preises nicht prüfen (nur Zeit-Untergrenzen, ARCHITEKTUR.md B1).
+// Wer einen Preis nutzt, gibt deshalb diese UTXO aus und erzeugt sie über
+// read() unverändert neu. Ein alter Preis ist dann schon ausgegeben und
+// nicht mehr verwendbar.
+//
+// Einheiten:
+//   kasUsd      USD je KAS × 1e8           (0,04 USD = 4_000_000)
+//   oracleDaa   DAA-Score des Preises
+//   stableRate  Zins je DAA × 1e18          (5 %/Jahr bei 10 BPS ≈ 158_548_959)
+//   stableIndex Schuldindex × 1e9           (Start 1_000_000_000)
+contract RiskOracle(
+    pubkey signer0, pubkey signer1, pubkey signer2, pubkey signer3, pubkey signer4,
+    int threshold,
+    int maxRate,
+    int initKasUsd, int initOracleDaa, int initSeq, int initStableRate, int initStableIndex
+) {
+    int kasUsd = initKasUsd;
+    int oracleDaa = initOracleDaa;
+    int seq = initSeq;
+    int stableRate = initStableRate;
+    int stableIndex = initStableIndex;
+
+    int constant MAX_SIGNERS = 5;
+    int constant RATE_SCALE = 1000000000;
+    // Preisgrenzen (Audit 3 O-2, 28.09.2026): ohne sie konnte ein Komitee mit
+    // 3 Schlüsseln jeden Preis bis 1e18 setzen; oberhalb von ≈ 920 USD rechnet
+    // der Vault nicht mehr (NumberTooBig) und Vaults frieren ein.
+    int constant MIN_UPDATE_GAP_DAA = 600;    // ≈ 1 min bei 10 BPS
+    int constant MIN_KAS_USD = 1000;          // 0,00001 USD
+    int constant MAX_KAS_USD = 90000000000;   // 900 USD
+
+
+    // Genau eine Fortsetzung, und die KAS in der UTXO dürfen nicht abfließen
+    // (validateOutputState prüft den Betrag nicht, ARCHITEKTUR.md B7).
+    function continuation(): int {
+        require(OpAuthOutputCount(this.activeInputIndex) == 1);
+        int outIdx = OpAuthOutputIdx(this.activeInputIndex, 0);
+        require(tx.outputs[outIdx].value == tx.inputs[this.activeInputIndex].value);
+        return outIdx;
+    }
+
+    function checkQuorum(byte[32] digest, datasig[] sigs, int[] signerIdx) {
+        require(sigs.length == threshold);
+        require(signerIdx.length == threshold);
+        pubkey[5] keys = pubkey[5]{signer0, signer1, signer2, signer3, signer4};
+        int last = -1;
+        for(k, 0, threshold, MAX_SIGNERS) {
+            int idx = signerIdx[k];
+            // streng aufsteigend: kein Signierer zählt doppelt
+            require(idx > last);
+            require(idx < MAX_SIGNERS);
+            require(checkMsgSig(sigs[k], digest, keys[idx]));
+            last = idx;
+        }
+    }
+
+    // Jeder darf den Preis nutzen, solange der Zustand unverändert bleibt.
+    entry read() {
+        int outIdx = continuation();
+        validateOutputState(outIdx, State {
+            kasUsd: kasUsd,
+            oracleDaa: oracleDaa,
+            seq: seq,
+            stableRate: stableRate,
+            stableIndex: stableIndex
+        });
+    }
+
+    // Neuer Preis und neuer Zinssatz, signiert von threshold-von-5 Signierern.
+    // Den Index schreibt der Vertrag fort, nicht das Komitee: für den
+    // abgelaufenen Zeitraum gilt der ALTE Satz.
+    entry update(int newKasUsd, int newOracleDaa, int newStableRate, datasig[] sigs, int[] signerIdx) {
+        require(newKasUsd >= MIN_KAS_USD);
+        require(newKasUsd <= MAX_KAS_USD);
+        // je Update höchstens halbieren oder verdoppeln: ein einzelner Fehler
+        // oder ein kompromittiertes Update kann nicht alles auf einmal kippen
+        require(newKasUsd * 2 >= kasUsd);
+        require(newKasUsd <= kasUsd * 2);
+        // Mindestabstand ≈ 1 min zwischen Updates (Fix-Review I-3: ×2/÷2 allein
+        // ist keine Zeitbremse – 15 Updates führten sonst in Sekunden von
+        // 0,04 auf 900 USD)
+        require(newOracleDaa >= oracleDaa + MIN_UPDATE_GAP_DAA);
+        // Preis nicht aus der Zukunft: Tx erst ab diesem DAA-Score gültig
+        require(tx.daa >= newOracleDaa);
+        require(newStableRate >= 0);
+        require(newStableRate <= maxRate);
+
+        int newSeq = seq + 1;
+        byte[32] covId = OpInputCovenantId(this.activeInputIndex);
+        byte[] message = byte[](covId)
+            + byte[](newKasUsd as byte[8])
+            + byte[](newOracleDaa as byte[8])
+            + byte[](newSeq as byte[8])
+            + byte[](newStableRate as byte[8]);
+        checkQuorum(sha256(message), sigs, signerIdx);
+
+        // growth = relativer Zuwachs × 1e9. Reihenfolge gegen Überlauf gewählt:
+        // rate·Δ läuft erst ab Δ > 9,2e9 DAA (≈ 29 Jahre bei maxRate 1e9) über,
+        // index·growth erst bei > 92 % Zuwachs in einem Update bei Index 1e10.
+        // (index·rate zuerst lief schon bei Index ≈ 9,2e9 über, Test vom 28.09.2026.)
+        // Abrundung: höchstens 1e-9 des Index je Update zugunsten der Schuldner.
+        int delta = newOracleDaa - oracleDaa;
+        int growth = stableRate * delta / RATE_SCALE;
+        int newIndex = stableIndex + stableIndex * growth / RATE_SCALE;
+
+        int outIdx = continuation();
+        validateOutputState(outIdx, State {
+            kasUsd: newKasUsd,
+            oracleDaa: newOracleDaa,
+            seq: newSeq,
+            stableRate: newStableRate,
+            stableIndex: newIndex
+        });
+    }
+}

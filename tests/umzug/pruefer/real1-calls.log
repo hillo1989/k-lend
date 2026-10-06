@@ -1,0 +1,28 @@
+v2 --network mainnet --state deployments/mainnet-v2.json status --json
+v2 --network mainnet --state deployments/mainnet-v2.json --json keys
+v2 --network mainnet --state deployments/mainnet-v2.json --json keys
+v2 --network mainnet --state deployments/mainnet-v2.json status --json
+v2 --network mainnet --state deployments/mainnet-v2.json status --json
+v2 --network mainnet --state deployments/mainnet-v2.json --json keys
+v2 --network mainnet --state deployments/mainnet-v2.json repay --key keys/mainnet-owner.json --vault 2 --ghost 0.10000000
+v2 --network mainnet --state deployments/mainnet-v2.json close --key keys/mainnet-owner.json --vault 2
+v2 --network mainnet --state deployments/mainnet-v2.json status --json
+v2 --network mainnet --state deployments/mainnet-v2.json --json keys
+v2 --network mainnet --state deployments/mainnet-v2.json repay --key keys/mainnet-owner.json --vault 0 --ghost 0.30000000
+v2 --network mainnet --state deployments/mainnet-v2.json close --key keys/mainnet-owner.json --vault 0
+v2 --network mainnet --state deployments/mainnet-v2.json status --json
+v2 --network mainnet --state deployments/mainnet-v2.json --json keys
+v2 --network mainnet --state deployments/mainnet-v2.json repay --key keys/mainnet-owner.json --vault 1 --ghost 0.60000000
+v2 --network mainnet --state deployments/mainnet-v2.json status
+v3 --network mainnet --state deployments/mainnet.json deploy --key keys/mainnet-owner.json --committee keys/mainnet-committee.json --rate 0
+v3 --network mainnet --state deployments/mainnet.json --json keys
+v3 --network mainnet --state deployments/mainnet.json status --json
+v3 --network mainnet --state deployments/mainnet.json open-vault --key keys/mainnet-owner.json --kas 50
+v3 --network mainnet --state deployments/mainnet.json status --json
+v3 --network mainnet --state deployments/mainnet.json mint --key keys/mainnet-owner.json --vault 0 --ghost 0.5
+v3 --network mainnet --state deployments/mainnet.json status --json
+v3 --network mainnet --state deployments/mainnet.json --json keys
+v3 --network mainnet --state deployments/mainnet.json --json keys
+v3 --network mainnet --state deployments/mainnet.json pool-open --key keys/mainnet-owner.json --kas 5.00000000 --ghost 0.25
+v3 --network mainnet --state deployments/mainnet.json status
+v3 --network mainnet --state deployments/mainnet.json balance --key keys/mainnet-owner.json

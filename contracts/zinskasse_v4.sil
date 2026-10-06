@@ -1,0 +1,58 @@
+pragma silverscript ^0.1.0; // Sprachversion des Compilers v1.0.0 ist 0.1.0 (compiler/mod.rs:55)
+
+// ZinskasseV4 — Sammeladresse für den Zins aus Vault v4, deren Ziel sich
+// ohne neues Deployment ändern lässt.
+//
+// Vault v4 zahlt den Zins an ein festes scriptPubKey (Konstruktor interestSpk).
+// Ist das die P2SH-Adresse dieses Vertrags, liegt der Zins hier, bis ihn
+// jemand mit forward an das aktuelle Zinsziel des Unterzeichner-Registers
+// weiterleitet (payKind/payTo, änderbar nur über propose → Wartezeit →
+// activate). Andere Varianten ohne diesen Vertrag (direkt an eine Adresse,
+// Verbrennen) stellt man allein über interestSpk im Vault ein.
+//
+// Der Vertrag hat keinen Zustand und kein Covenant: jede Zins-Zahlung ist eine
+// eigene UTXO mit dieser Adresse.
+contract ZinskasseV4(byte[32] regCovId, int regPrefixLen, int regSuffixLen, byte[32] regTemplateHash) {
+
+    // muss der State-Anordnung von signer_register_v4.sil entsprechen
+    struct RegState {
+        bool isTicket;
+        byte[32] setHash;
+        byte[32] fbHash;
+        byte payKind;
+        byte[32] payTo;
+        int nonce;
+        bool emerg;
+        int lastDaa;
+        byte[32] oracleCov;
+        byte[32] oracleTpl;
+        int oraclePrefixLen;
+        int oracleSuffixLen;
+        bool initialized;
+    }
+
+    // Jeder darf weiterleiten: die Haupt-UTXO des Registers steht in der Tx
+    // (Eintrag witness), ihr Zinsziel gilt. Der ganze Betrag geht an den
+    // Ausgang mit demselben Index wie dieser Eingang – so können sich zwei
+    // Kassen-Eingänge nie einen Ausgang teilen (Lehre aus Audit 11 A11-V-1).
+    // Die Netzgebühr trägt, wer weiterleitet.
+    entry forward(int regIdx) {
+        require(OpInputCovenantId(regIdx) == regCovId);
+        RegState r = readInputStateWithTemplate(regIdx, regPrefixLen, regSuffixLen, regTemplateHash);
+        // ein Ticket trägt nur ein ANGEKÜNDIGTES Ziel
+        require(!r.isTicket);
+        int i = this.activeInputIndex;
+        require(tx.outputs[i].value == tx.inputs[i].value);
+        // nie an die Kasse selbst: sonst könnte ein Vault-Schließen denselben
+        // Ausgang als seine Zinszahlung ausgeben (geteilter Ausgang, A11-V-1)
+        require(tx.outputs[i].scriptPubKey != this.activeScriptPubKey);
+        if (r.payKind == 0x00) {
+            byte[36] p2pk = new ScriptPubKeyP2PK(pubkey(r.payTo));
+            require(tx.outputs[i].scriptPubKey == byte[](p2pk));
+        } else {
+            require(r.payKind == 0x01);
+            byte[37] p2sh = new ScriptPubKeyP2SH(r.payTo);
+            require(tx.outputs[i].scriptPubKey == byte[](p2sh));
+        }
+    }
+}

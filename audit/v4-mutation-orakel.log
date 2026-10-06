@@ -1,0 +1,15 @@
+rot     L53 | require(OpAuthOutputCount(this.activeInputIndex) == 1); | lesen_laesst_alles_unveraendert update_mit_zwei_fortsetzungen_scheitert test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.11s 
+rot     L55 | require(tx.outputs[outIdx].value == tx.inputs[this.activeInputIndex].value); | lesen_laesst_alles_unveraendert fortsetzung_behaelt_den_betrag test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.18s 
+rot     L71 | require(OpCovInputCount(regCovId) == 1); | update_ohne_register_scheitert test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.97s 
+rot     L72 | require(newKasUsd >= MIN_KAS_USD); | preisgrenzen_wie_v3 test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.14s 
+rot     L73 | require(newKasUsd <= MAX_KAS_USD); | preisgrenzen_wie_v3 test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.16s 
+rot     L74 | require(newKasUsd * 2 >= kasUsd); | preisgrenzen_wie_v3 test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.19s 
+rot     L75 | require(newKasUsd <= kasUsd * 2); | preisgrenzen_wie_v3 test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.11s 
+rot     L76 | require(newOracleDaa >= oracleDaa + MIN_UPDATE_GAP_DAA); | mindestabstand_und_keine_zukunft test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.14s 
+rot     L77 | require(tx.daa >= newOracleDaa); | mindestabstand_und_keine_zukunft test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.22s 
+rot     L78 | require(newStableRate >= 0); | zins_im_rahmen test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.67s 
+rot     L79 | require(newStableRate <= maxRate); | zins_im_rahmen test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.37s 
+rot     L85 | require(newOracleDaa >= lastRateDaa + rateGapDaa); | zins_im_rahmen test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.11s 
+rot     L86 | require(newStableRate - stableRate <= rateStep); | zins_im_rahmen test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.15s 
+rot     L87 | require(stableRate - newStableRate <= rateStep); | zins_im_rahmen test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.21s 
+rot     L105 | require(tx.daa >= oracleDaa + freezeAfterDaa); | einfrieren_erst_nach_der_frist_und_durch_jeden test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.21s 

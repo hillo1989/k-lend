@@ -1,0 +1,17 @@
+{
+  "name": "K.Lend – GHOST auf Kaspa",
+  "short_name": "K.Lend",
+  "description": "GHOST: Stablecoin und Kredite direkt auf Kaspa L1.",
+  "lang": "de",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1416",
+  "theme_color": "#0f1416",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

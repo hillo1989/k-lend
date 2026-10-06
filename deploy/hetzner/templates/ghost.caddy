@@ -1,0 +1,21 @@
+# GHOST-Seite als Caddy-Site-Block (von deploy/hetzner/setup.sh erzeugt).
+# Caddy holt das HTTPS-Zertifikat für @DOMAIN@ selbst (Let's Encrypt),
+# sobald der DNS-Eintrag auf diesen Server zeigt.
+# - eigener Caddy (Port 80/443 waren frei): wird zu /etc/caddy/Caddyfile
+# - vorhandener Caddy: liegt als /etc/caddy/ghost.caddy daneben und wird mit
+#   „import ghost.caddy“ am Ende der bestehenden Caddyfile eingebunden
+@DOMAIN@ {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	# Wallet-Aktionen schicken Plan und signierte Tx (bis ~130 kB, die Seite
+	# selbst nimmt bis 768 kB an); 64 KB ließ mint/repay/close scheitern (Audit 17 A17-5)
+	request_body {
+		max_size 1MB
+	}
+	# Caddy setzt X-Forwarded-For selbst (fremde Einträge verwirft er); die
+	# Seite zählt den letzten Eintrag. Kein Antwort-Zeitlimit: Senden dauert bis 170 s.
+	reverse_proxy 127.0.0.1:@GHOST_PORT@
+}

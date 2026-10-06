@@ -1,0 +1,7 @@
+rot     L40 | require(OpInputCovenantId(regIdx) == regCovId); | ziel_kommt_nur_aus_der_echten_haupt_utxo test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.93s 
+rot     L43 | require(!r.isTicket); | ziel_kommt_nur_aus_der_echten_haupt_utxo test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.94s 
+rot     L45 | require(tx.outputs[i].value == tx.inputs[i].value); | weiterleiten_an_p2pk test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.90s 
+rot     L48 | require(tx.outputs[i].scriptPubKey != this.activeScriptPubKey); | nie_an_die_kasse_selbst test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.91s 
+rot     L51 | require(tx.outputs[i].scriptPubKey == byte[](p2pk)); | weiterleiten_an_p2pk test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.03s 
+rot     L53 | require(r.payKind == 0x01); | unbekannte_art_auch_nicht_als_p2sh test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.91s 
+rot     L55 | require(tx.outputs[i].scriptPubKey == byte[](p2sh)); | weiterleiten_an_p2sh_und_verbrennen test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.86s 

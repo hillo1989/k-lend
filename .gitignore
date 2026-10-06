@@ -1,0 +1,21 @@
+.DS_Store
+# Private Schlüssel – niemals committen
+keys/
+*.json.tmp
+deployments/*skripttest*
+# Laufzeitdateien von ghostctl (Fix-Review 8, NEU-7)
+deployments/*.lock
+deployments/*.tmp
+app/tsconfig.tsbuildinfo
+# Daueraufträge und lokaler Verlauf: persönliche Daten (Empfänger, Nachrichten)
+deployments/*-abos.json
+deployments/*-txlog.jsonl
+# Zinsregel des Agenten (Messungen, letzte Zinsänderung) und Sperre des Umzugs
+deployments/*-zins.json
+deployments/.umzug-v3.lock/
+# Programme älterer Versionen für den Abbau (lokal gebaut, nicht committen)
+bin/ghostctl-v2
+bin/ghostctl-v3
+deployments/.umzug-v4.lock/
+# vom Server-Setup erzeugte Webserver-Blöcke (deploy/hetzner/setup.sh)
+deploy/hetzner/generated/

@@ -1,0 +1,65 @@
+rot     L181 | require(tx.outputs[idx].scriptPubKey == interestSpk); | a12_kasse_direkt_hinter_dem_vault_auch_an_eingang_1 a11_zwei_vaults_teilen_sich_keine_zinszahlung a11_zombie_vault_wird_zugunsten_der_kasse_aufgeloest v3_schliessen_zahlt_den_zins_an_die_zinskasse v3_zins_unter_staub_wird_erlassen v4_zinsziel_p2sh_zinskasse_und_verbrennen test result: FAILED. 89 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.80s 
+rot     L182 | require(tx.outputs[idx].value >= fee); | a11_zombie_vault_wird_zugunsten_der_kasse_aufgeloest v3_schliessen_rechnet_den_zins_bis_zum_orakelindex v3_schliessen_zahlt_den_zins_an_die_zinskasse v3_zins_hoechstens_die_sicherheit v4_zinsziel_p2sh_zinskasse_und_verbrennen test result: FAILED. 90 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.16s 
+rot     L197 | require(value > 0); | withdraw_auf_null_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.67s 
+rot     L198 | require(value <= MAX_COLLATERAL); | deposit_ueber_der_obergrenze_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.01s 
+LUECKE  L199 | require(newDebt >= 0);
+rot     L200 | require(newDebt <= MAX_DEBT); | schuld_ueber_der_obergrenze_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.91s 
+LUECKE  L201 | require(newInterest >= 0);
+rot     L202 | require(newInterest <= MAX_INTEREST); | v3_zins_ueber_der_rechengrenze_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.15s 
+rot     L203 | require(OpAuthOutputCount(this.activeInputIndex) == 1); | doppelte_fortsetzung_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.21s 
+rot     L205 | require(tx.outputs[outIdx].value == value); | liquidation_unter_der_schwelle v3_ruecknahme_zahlt_einen_dollar_je_ghost test result: FAILED. 93 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.73s 
+rot     L211 | require(OpInputCovenantId(oracleIdx) == oracleCovId); | mint_mit_falschem_orakel_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.17s 
+rot     L213 | require(o.kasUsd > 0); | a11_preis_null_nur_durch_l165_gesperrt test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.14s 
+rot     L214 | require(!(fresh && o.frozen)); | v4_eingefroren_sperrt_aufloesen v4_eingefroren_sperrt_auszahlung_nur_mit_schuld v4_eingefroren_sperrt_liquidation v4_eingefroren_sperrt_praegen v4_eingefroren_sperrt_ruecknahme test result: FAILED. 90 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.93s 
+rot     L219 | require(OpCovInputCount(ghostCovId) == 0); | einzahlen_mit_leerer_ghost_gruppe_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.06s 
+LUECKE  L220 | require(OpCovOutputCount(ghostCovId) == 0);
+LUECKE  L230 | require(nIn >= 1);
+LUECKE  L231 | require(nIn <= MAX_GHOST_INS);
+LUECKE  L232 | require(nOut >= 1);
+LUECKE  L233 | require(nOut <= MAX_GHOST_OUTS); // nicht nur dem Schleifenwächter des Compilers überlassen (A11-V-7)
+LUECKE  L234 | require(outStates.length == nOut);
+rot     L239 | require(tx.outputs[OpCovOutputIdx(ghostCovId, 0)].value == tx.inputs[templateIdx].value); | v21_minter_zweig_behaelt_seine_kas test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.21s 
+rot     L245 | require(s.isMinter); | praegen_nur_ueber_den_eigenen_minter_zweig test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.37s 
+rot     L246 | require(s.identifierType == IDENTIFIER_COVENANT_ID); | praegen_nur_ueber_den_eigenen_minter_zweig test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.96s 
+rot     L247 | require(s.ownerIdentifier == myCov); | praegen_nur_ueber_den_eigenen_minter_zweig test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.78s 
+rot     L249 | require(!s.isMinter); | tilgen_mit_zweitem_minter_eingang_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.36s 
+rot     L258 | require(o.isMinter); | minter_fortsetzung_ohne_minterrecht_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.09s 
+rot     L259 | require(o.identifierType == IDENTIFIER_COVENANT_ID); | minter_fortsetzung_mit_falschem_besitzertyp_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.01s 
+rot     L260 | require(o.ownerIdentifier == myCov); | minter_fortsetzung_an_fremden_covenant_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.25s 
+rot     L261 | require(o.amount == 0); | minter_fortsetzung_mit_guthaben_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.04s 
+rot     L263 | require(!o.isMinter); | mint_darf_keinen_zweiten_minter_erzeugen test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.44s 
+rot     L264 | require(o.amount > 0); | tilgen_mit_leerem_ghost_ausgang_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.27s 
+rot     L276 | require(checkSig(s, pubkey(owner))); | v2_einzahlen_nur_durch_besitzer test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.08s 
+rot     L279 | require(newColl > collateral()); | deposit_darf_nicht_abziehen test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.31s 
+rot     L285 | require(checkSig(s, pubkey(owner))); | withdraw_nur_durch_besitzer test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.22s 
+rot     L287 | require(newColl < collateral()); | withdraw_darf_nicht_einzahlen test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.09s 
+rot     L290 | require(healthy(newColl, debt + owedInterest, kasUsd, mcrBps)); | v3_zins_zaehlt_fuer_die_auszahlung withdraw_bis_zur_mindestquote test result: FAILED. 93 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.55s 
+rot     L298 | require(checkSig(s, pubkey(owner))); | close_nur_durch_besitzer test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.19s 
+rot     L300 | require(debt == 0); | close_nur_ohne_schuld test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.38s 
+rot     L301 | require(OpAuthOutputCount(this.activeInputIndex) == 0); | close_darf_die_covenant_id_nicht_weiterleben_lassen test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.07s 
+rot     L315 | require(debt == 0); | a11_auflösen_nur_ohne_schuld_und_wenn_der_zins_alles_aufzehrt test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.09s 
+rot     L316 | require(OpAuthOutputCount(this.activeInputIndex) == 0); | a11_auflösen_nur_ohne_schuld_und_wenn_der_zins_alles_aufzehrt test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.27s 
+rot     L319 | require(interestFee(index, kasUsd) == coll); | a11_auflösen_nur_ohne_schuld_und_wenn_der_zins_alles_aufzehrt a12_aufloesen_grenze_auf_ein_sompi_genau a12_zinsgebuehr_rechengrenze_bei_tiefstpreis test result: FAILED. 92 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.29s 
+rot     L325 | require(checkSig(s, pubkey(owner))); | mint_ohne_besitzer_signatur_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.16s 
+rot     L326 | require(amount > 0); | mint_mit_negativem_betrag_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.19s 
+LUECKE  L327 | require(OpCovOutputCount(ghostCovId) == 2);
+rot     L328 | require(ghostDelta(outStates) == amount); | mint_darf_keinen_zweiten_minter_erzeugen mint_mehr_ausgeben_als_verbucht_scheitert minter_fortsetzung_an_fremden_covenant_scheitert minter_fortsetzung_mit_falschem_besitzertyp_scheitert minter_fortsetzung_mit_guthaben_scheitert minter_fortsetzung_ohne_minterrecht_scheitert praegen_nur_ueber_den_eigenen_minter_zweig test result: FAILED. 88 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.78s 
+rot     L332 | require(healthy(collateral(), newDebt + owedInterest, kasUsd, mcrBps)); | mint_eine_einheit_ueber_der_mindestquote_scheitert_am_vault v3_zins_zaehlt_fuer_die_mindestquote test result: FAILED. 93 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.14s 
+rot     L334 | require(newDebt <= maxDebt); | mint_bis_zur_obergrenze_je_vault v3_obergrenze_gilt_nur_fuer_die_gepraegte_schuld test result: FAILED. 93 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.92s 
+rot     L341 | require(checkSig(s, pubkey(owner))); | v21_repay_nur_durch_besitzer test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.11s 
+rot     L343 | require(burned > 0); | repay_darf_nicht_praegen test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.27s 
+LUECKE  L344 | require(burned <= debt); // keine Überzahlung, sonst wären GHOST verloren
+LUECKE  L354 | require(amount > 0);
+LUECKE  L355 | require(amount <= debt);
+rot     L356 | require(amount >= MIN_REDEEM || amount == debt); | v3_ruecknahme_mindestens_ein_ghost_oder_die_ganze_schuld test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.47s 
+rot     L357 | require(0 - ghostDelta(outStates) == amount); | a11_drei_ghost_ausgaenge_bei_ruecknahme_zweitsicherung v3_ruecknahme_mit_falschem_betrag_scheitert test result: FAILED. 93 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.00s 
+rot     L361 | require(healthy(coll, debt + owedInterest, kasUsd, liqBps)); | v3_ruecknahme_nur_ab_der_liquidationsschwelle test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.71s 
+LUECKE  L364 | require(paid > 0);
+rot     L365 | require(coll - paid >= DUST); | v3_ruecknahme_laesst_mindestens_staub_im_vault test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.07s 
+rot     L378 | require(!healthy(coll, debt + owedInterest, kasUsd, liqBps)); | liquidation_eines_gesunden_vaults_scheitert liquidationsgrenze_auf_die_einheit_genau v3_zins_macht_liquidierbar test result: FAILED. 92 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.87s 
+rot     L379 | require(burn > 0); | liquidation_mit_negativem_betrag_praegt_nicht test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.19s 
+rot     L380 | require(burn <= debt); | v2_liquidation_bei_unterdeckung_lohnt_sich_und_bucht_aus test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.13s 
+rot     L381 | require(0 - ghostDelta(outStates) == burn); | liquidation_mit_falschem_burn_argument_scheitert test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.70s 
+rot     L392 | require(OpAuthOutputCount(this.activeInputIndex) == 0); | totalliquidation_darf_die_covenant_id_nicht_weiterleben_lassen test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.97s 
+rot     L395 | require(burn == debt); | kleiner_rest_nur_bei_voller_tilgung test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.12s 
+rot     L396 | require(OpAuthOutputCount(this.activeInputIndex) == 0); | v21_kleiner_rest_ohne_weiterleben_der_covenant_id test result: FAILED. 94 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.46s 

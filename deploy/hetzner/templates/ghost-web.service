@@ -1,0 +1,57 @@
+# Öffentliche K.Lend-Seite (app/server/prod.ts), von setup.sh erzeugt.
+# Lauscht nur auf 127.0.0.1:@GHOST_PORT@ (und ggf. GHOST_HOST, z. B. dem
+# Gateway eines Docker-Netzes); nach außen über Caddy/nginx/Apache.
+# Immer öffentlicher Modus: keine Schlüsseldateien. Gesendet werden nur Tx,
+# die Besucher in ihrer Browser-Wallet signiert haben (/api/wallet/submit);
+# dafür nimmt ghostctl kurz die Sperre der Zustandsdatei und schreibt das
+# Journal in deployments/.
+[Unit]
+Description=GHOST K.Lend Seite (öffentlicher Modus)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ghost
+Group=ghost
+WorkingDirectory=@GHOST_DIR@/app
+Environment=NODE_ENV=production
+Environment=GHOST_PUBLIC=1
+Environment=GHOST_PORT=@GHOST_PORT@
+Environment=GHOST_PROJECT_DIR=@GHOST_DIR@
+Environment=GHOSTCTL_BIN=@GHOST_DIR@/vendor/silverscript/target/release/ghostctl
+# GHOST_DOMAIN steht hier (setup.sh schreibt sie):
+EnvironmentFile=-/etc/ghost/web.env
+ExecStart=@NODE_BIN@ @GHOST_DIR@/app/server/prod.ts
+Restart=always
+RestartSec=5
+# Speicher begrenzen, damit die Seite den Agenten nie verdrängt (2 GB RAM)
+MemoryMax=600M
+
+# Härtung: Die Seite sieht keys/ überhaupt nicht; schreiben nur in deployments/
+# (ghostctl status und wallet submit --send nehmen dort die Sperre, gleichen
+# die Zustandsdatei ab und führen das Journal)
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=@GHOST_DIR@/deployments
+InaccessiblePaths=-@GHOST_DIR@/keys
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

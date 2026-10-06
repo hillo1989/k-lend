@@ -1,0 +1,153 @@
+pragma silverscript ^0.1.0; // Sprachversion des Compilers v1.0.0 ist 0.1.0
+
+// StandingOrder — Dauerauftrag mit Tresor: KAS liegen in diesem Covenant und
+// werden zu festen Terminen an einen festen Empfänger gezahlt, auch wenn der
+// Rechner des Absenders aus ist.
+//
+// Zahlen      = pay: JEDER darf auslösen (in der Regel der Empfänger selbst
+//               oder ein GHOST-Agent), aber nur frühestens am Termin (tx.time,
+//               Unix-ms), genau `amount` an `recipient` (P2PK) und höchstens
+//               `maxFee` aus dem Tresor für die Netzgebühr.
+//               Jede Zahlung schiebt den Termin um genau eine Periode weiter;
+//               verpasste Termine lassen sich einzeln nachzahlen (bei Miete
+//               ist jeder Monat geschuldet).
+// Termine     = anchorDay 1–31: monatlich am Kalendertag anchorDay, in
+//               kürzeren Monaten am Monatsletzten, zur selben Uhrzeit (UTC).
+//               anchorDay 0: festes Intervall periodMs (z. B. 7 Tage).
+// Nachricht   = payloadHash: sha256 des Payloads, den JEDE Zahlung tragen muss
+//               (die beim Anlegen hinterlegte Nachricht, öffentlich oder an den
+//               Empfänger verschlüsselt; ohne Nachricht der Hash des leeren
+//               Payloads). So kann niemand, der auslöst, eine eigene Nachricht
+//               unterschieben (Audit 12, A12-1).
+// Ende        = left: verbleibende Zahlungen (−1 = unbegrenzt). Nach der
+//               letzten bleibt der Rest im Tresor, bis der Absender kündigt.
+// Absender    = owner: kündigt jederzeit (cancel) oder füllt auf (topUp).
+//
+// Einheiten: sompi (1e8 je KAS), Zeit in Unix-Millisekunden (UTC).
+
+contract StandingOrder(
+    byte[32] owner,
+    byte[32] recipient,
+    int amount,
+    int anchorDay,
+    int periodMs,
+    int maxFee,
+    byte[32] payloadHash,
+    int initNextDue,
+    int initLeft
+) {
+    int nextDue = initNextDue;
+    int left = initLeft;
+
+    int constant DAY_MS = 86400000;
+    // Termine höchstens bis 2200. Nach unten sorgt tx.time selbst für ein
+    // gültiges Datum (≥ LOCK_TIME_THRESHOLD, 1985); die Kalenderrechnung
+    // stimmt ab 1970.
+    int constant MAX_TIME = 7258118400000;     // 2200-01-01
+
+    // CAL-BEGIN (wird von protocol/tests/standing_order_tests.rs herausgelöst)
+
+    // Tage seit 1970-01-01 → (Jahr, Monat, Tag), proleptisch gregorianisch
+    // (H. Hinnant, civil_from_days; hier nur für Tage ≥ 0)
+    function civil(int z0): (int, int, int) {
+        int z = z0 + 719468;
+        int era = z / 146097;
+        int doe = z - era * 146097;
+        int yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        int doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        int mp = (5 * doy + 2) / 153;
+        int d = doy - (153 * mp + 2) / 5 + 1;
+        int m = mp < 10 ? mp + 3 : mp - 9;
+        int y = yoe + era * 400 + (m <= 2 ? 1 : 0);
+        return (y, m, d);
+    }
+
+    // (Jahr, Monat, Tag) → Tage seit 1970-01-01 (days_from_civil)
+    function days(int y0, int m, int d): int {
+        int y = y0 - (m <= 2 ? 1 : 0);
+        int era = y / 400;
+        int yoe = y - era * 400;
+        int mp = m > 2 ? m - 3 : m + 9;
+        int doy = (153 * mp + 2) / 5 + d - 1;
+        int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        int res = era * 146097 + doe - 719468;
+        return res;
+    }
+
+    function monthDays(int y, int m): int {
+        int n = 31;
+        if (m == 4 || m == 6 || m == 9 || m == 11) {
+            n = 30;
+        }
+        if (m == 2) {
+            bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            n = leap ? 29 : 28;
+        }
+        return n;
+    }
+
+    // Termin nach `due`: nächster Monat am Tag min(anchor, Monatslänge) zur
+    // selben Uhrzeit, oder due + period bei anchor 0
+    function following(int due, int anchor, int period): int {
+        int next = due + period;
+        if (anchor > 0) {
+            int day = due / DAY_MS;
+            int tod = due % DAY_MS;
+            (int y, int m, int d) = civil(day);
+            int ny = m == 12 ? y + 1 : y;
+            int nm = m == 12 ? 1 : m + 1;
+            int dim = monthDays(ny, nm);
+            int nd = anchor < dim ? anchor : dim;
+            next = days(ny, nm, nd) * DAY_MS + tod;
+        }
+        return next;
+    }
+
+    // CAL-END
+
+    function myValue(): int {
+        return tx.inputs[this.activeInputIndex].value;
+    }
+
+    // Zahlung des fälligen Termins. Der Zahlungsausgang steht an derselben
+    // Stelle wie dieser Eingang: so können sich zwei Tresore in einer Tx nie
+    // einen Ausgang teilen (sonst bekäme der Empfänger einmal, was zweimal
+    // abgebucht wird). Die Fortsetzung behält alles außer amount + maxFee.
+    entry pay() {
+        require(left != 0);
+        require(tx.time >= temporal(nextDue));
+        // genau die hinterlegte Nachricht (auch leer): Payload fest gebunden
+        require(sha256(OpTxPayloadSubstr(0, OpTxPayloadLen())) == payloadHash);
+        int payIdx = this.activeInputIndex;
+        byte[36] to = new ScriptPubKeyP2PK(pubkey(recipient));
+        require(tx.outputs[payIdx].scriptPubKey == byte[](to));
+        require(tx.outputs[payIdx].value == amount);
+        int keep = myValue() - amount - maxFee;
+        require(keep > 0);
+        require(OpAuthOutputCount(this.activeInputIndex) == 1);
+        int outIdx = OpAuthOutputIdx(this.activeInputIndex, 0);
+        require(tx.outputs[outIdx].value >= keep);
+        int due = following(nextDue, anchorDay, periodMs);
+        require(due > nextDue);
+        require(due <= MAX_TIME);
+        // nach der letzten Zahlung bleibt der Tresor mit left = 0 stehen;
+        // den Rest holt der Absender mit cancel
+        int newLeft = left > 0 ? left - 1 : left;
+        validateOutputState(outIdx, State { nextDue: due, left: newLeft });
+    }
+
+    // Absender legt KAS nach; Termine bleiben
+    entry topUp(sig s) {
+        require(checkSig(s, pubkey(owner)));
+        require(OpAuthOutputCount(this.activeInputIndex) == 1);
+        int outIdx = OpAuthOutputIdx(this.activeInputIndex, 0);
+        require(tx.outputs[outIdx].value > myValue());
+        validateOutputState(outIdx, State { nextDue: nextDue, left: left });
+    }
+
+    // Absender kündigt: der Tresor endet, die KAS gehen, wohin er signiert
+    entry cancel(sig s) {
+        require(checkSig(s, pubkey(owner)));
+        require(OpAuthOutputCount(this.activeInputIndex) == 0);
+    }
+}

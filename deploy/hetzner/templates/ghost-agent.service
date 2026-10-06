@@ -1,0 +1,53 @@
+# GHOST-Agent im Mainnet (von deploy/hetzner/setup.sh aus der Vorlage erzeugt).
+# Orakel (Unterzeichner-Datei), Zinsregel, Liquidationen, Auflösen, Tresore.
+# Gebühren und Liquidationen zahlt der Keeper-Schlüssel (--key), Preise
+# signiert die Unterzeichner-Datei (--committee). Der Besitzer-Schlüssel
+# (keys/mainnet-owner.json) liegt NICHT auf dem Server.
+#
+# WICHTIG: Läuft dieser Dienst, muss der Agent auf dem Mac aus bleiben
+# (sonst streiten beide um dieselben UTXOs).
+[Unit]
+Description=GHOST-Agent (Kaspa-Mainnet)
+Wants=network-online.target
+After=network-online.target
+# keine Endlosschleife bei dauerhaftem Fehler: höchstens 10 Starts in 10 Minuten
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=ghost
+Group=ghost
+WorkingDirectory=@GHOST_DIR@
+ExecStart=@GHOST_DIR@/vendor/silverscript/target/release/ghostctl --network mainnet --state deployments/mainnet.json --ja agent --key keys/mainnet-keeper.json --committee keys/mainnet-signer.json --interval 300 --min-change 0.005 --max-age-min 60
+Restart=always
+RestartSec=30
+# Ein Abbruch mitten im Senden ist abgesichert: ghostctl klärt offene
+# Sendungen beim nächsten Start über sein Journal (store::resolve_pending).
+TimeoutStopSec=30
+
+# Härtung: Schreiben nur in deployments/, alles andere schreibgeschützt
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=@GHOST_DIR@/deployments
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

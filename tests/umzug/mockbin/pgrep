@@ -1,0 +1,8 @@
+#!/bin/zsh
+# Attrappe: meldet einen laufenden Agenten nur mit MOCK_AGENT=1, mit MOCK_COUNT erst ab dem 2. Aufruf
+if [ -n "$MOCK_COUNT" ]; then
+  n=$(( $(cat $MOCK_COUNT 2>/dev/null || echo 0) + 1 )); echo $n > $MOCK_COUNT
+  [ $n -ge 2 ] && { echo "4712 ./ghostctl oracle-feed"; exit 0; }; exit 1
+fi
+[ "$MOCK_AGENT" = 1 ] && { echo "4711 caffeinate -i ./ghostctl --network mainnet --state deployments/mainnet.json --ja agent --key keys/mainnet-owner.json"; exit 0; }
+exit 1

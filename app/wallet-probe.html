@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <title>Wallet-Probe (lokal)</title>
+    <style>
+      body { background: #0f1416; color: #e6ecee; font: 15px/1.5 system-ui, sans-serif; margin: 0; padding: 16px; }
+      main { max-width: 860px; margin: 0 auto; }
+      section { border: 1px solid #2a3539; border-radius: 8px; padding: 12px 16px; margin: 12px 0; }
+      h1 { font-size: 22px; } h2 { font-size: 16px; margin: 0 0 8px; }
+      button { background: #1f6f63; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; margin: 4px 8px 4px 0; cursor: pointer; font: inherit; }
+      button:disabled { background: #34413f; color: #8a9a9a; cursor: default; }
+      #btn-send, #btn-pay-send { background: #a33b2a; }
+      input, select, textarea { background: #182024; color: inherit; border: 1px solid #2a3539; border-radius: 6px; padding: 6px; font: inherit; }
+      textarea { width: 100%; min-height: 70px; box-sizing: border-box; }
+      .warn { color: #f0c36b; } .muted { color: #9aa8ab; }
+      .verdict { white-space: pre-wrap; padding: 8px; border-radius: 6px; }
+      .verdict.ok { background: #143326; } .verdict.bad { background: #3a1a17; }
+      #log .line { white-space: pre-wrap; border-bottom: 1px solid #222c30; padding: 4px 0; font-size: 13px; }
+      #log .ok { color: #8fe0b4; } #log .bad { color: #ff9b8a; }
+      label { cursor: pointer; } #acct, #probe-show { word-break: break-all; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="title">Wallet-Probe (nur lokal)</h1>
+      <p id="intro" class="muted"></p>
+      <section>
+        <h2>1. Netz und Wallet</h2>
+        <select id="network"><option value="mainnet">mainnet</option><option value="testnet-10">testnet-10</option></select>
+        <div id="wallets"></div>
+        <div id="acct" class="muted"></div>
+      </section>
+      <section>
+        <h2>2. Stufe</h2>
+        <div id="stages"></div>
+        <p id="stage-what" class="muted"></p>
+        <div id="open-opts" hidden>
+          Startguthaben (KAS): <input id="fund" value="1.5" size="6" />
+          Termin in Minuten: <input id="due" value="60" size="6" />
+        </div>
+        <div id="cancel-opts" hidden>
+          <div id="probe-show" class="muted"></div>
+          <textarea id="probe-text" placeholder="Probe-Datei (JSON) einfügen, falls nicht gemerkt"></textarea>
+          <button id="btn-probe-paste">Probe-Datei übernehmen</button>
+        </div>
+      </section>
+      <section>
+        <h2>3. Ablauf</h2>
+        <button id="btn-export">Tx holen</button>
+        <button id="btn-sign">In der Wallet signieren und prüfen</button>
+        <button id="btn-send" hidden>Jetzt senden</button>
+        <div id="summary"></div>
+        <div id="verdict" class="verdict"></div>
+      </section>
+      <section>
+        <h2>Sicherheitsnetz (falls Stufe 2 scheitert)</h2>
+        <p class="muted">Nach dem Termin darf jeder die eine Zahlung des Probe-Tresors auslösen: 1 KAS geht an deine eigene Adresse, ohne Wallet-Signatur. Etwa 0,5 KAS bleiben im Tresor, bis eine Kündigung mit Wallet-Signatur gelingt.</p>
+        <button id="btn-pay">Zahlung prüfen</button>
+        <button id="btn-pay-send">Zahlung senden</button>
+        <button id="btn-dl">Probe-Datei sichern</button>
+      </section>
+      <section>
+        <h2>Protokoll</h2>
+        <div id="log"></div>
+      </section>
+    </main>
+    <noscript>Diese Seite braucht JavaScript.</noscript>
+    <script type="module" src="/src/probe/main.ts"></script>
+  </body>
+</html>

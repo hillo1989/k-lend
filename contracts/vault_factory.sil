@@ -1,0 +1,128 @@
+pragma silverscript ^0.1.0; // Sprachversion des Compilers v1.0.0 ist 0.1.0 (compiler/mod.rs:55)
+
+// VaultFactory — legt den GHOST-Token an und gibt jedem neuen Vault seinen
+// eigenen Minter-Zweig.
+//
+// Ablauf:
+//   1. Genesis der Factory (uninitialisiert).
+//   2. init(): einmalig, vom Deployer signiert. Erzeugt in derselben Tx die
+//      Genesis des GHOST-Tokens: einen Wurzel-Minter-Zweig (Menge 0), der der
+//      Factory gehört. Legt den Template-Hash des Vaults fest. Danach hat der
+//      Deployer keine Rechte mehr.
+//   3. openVault(): jeder darf einen Vault für einen Besitzer eröffnen. Die Tx
+//      erzeugt die Genesis des Vaults (Template geprüft, Schuld 0) und spaltet
+//      vom Wurzel-Minter einen Minter-Zweig ab, der der neuen Vault-ID gehört.
+//
+// WICHTIG: Genesis-Ausgaben zählen nicht in OpAuthOutputCount/OpCovOutputCount
+// (rusty-kaspa covenants.rs, from_tx: "not added to the script-engine contexts").
+// Ein Angreifer könnte sonst neben dem echten Vault eine zweite Ausgabe mit
+// derselben neuen ID und beliebigem Skript anlegen und darüber den Minter-Zweig
+// benutzen. freshGenesis() schließt das aus.
+contract VaultFactory(
+    pubkey deployer,
+    int ghostPrefixLen, int ghostSuffixLen, byte[32] ghostTemplateHash,
+    byte[32] initGhostCovId, byte[32] initVaultTemplateHash, bool initInitialized
+) {
+    byte[32] ghostCovId = initGhostCovId;
+    byte[32] vaultTemplateHash = initVaultTemplateHash;
+    bool initialized = initInitialized;
+
+    struct GhostState {
+        byte[32] ownerIdentifier;
+        byte identifierType;
+        int amount;
+        bool isMinter;
+    }
+
+    // muss der State-Anordnung von stable_vault.sil entsprechen
+    struct VaultState {
+        byte[32] owner;
+        int debt;
+        int interest;
+        int indexAt;
+    }
+
+    byte constant IDENTIFIER_COVENANT_ID = 0x02;
+    int constant MAX_OUTPUTS = 8;
+    int constant MAX_COLLATERAL = 10000000000000000; // wie stable_vault.sil
+
+    function continuation(byte[32] nextGhost, byte[32] nextVaultHash) {
+        require(OpAuthOutputCount(this.activeInputIndex) == 1);
+        int outIdx = OpAuthOutputIdx(this.activeInputIndex, 0);
+        require(tx.outputs[outIdx].value == tx.inputs[this.activeInputIndex].value);
+        validateOutputState(outIdx, State { ghostCovId: nextGhost, vaultTemplateHash: nextVaultHash, initialized: true });
+    }
+
+    // Ausgabe idx ist eine frische Genesis (kein Input trägt ihre ID) und
+    // die einzige Ausgabe der Tx mit dieser ID.
+    function freshGenesis(int idx): byte[32] {
+        byte[32] id = OpOutputCovenantId(idx);
+        require(id != byte[32](0x0000000000000000000000000000000000000000000000000000000000000000));
+        require(OpCovInputCount(id) == 0);
+        int n = tx.outputs.length;
+        require(n <= MAX_OUTPUTS);
+        for(i, 0, n, MAX_OUTPUTS) {
+            if (i != idx) {
+                require(OpOutputCovenantId(i) != id);
+            }
+        }
+        return id;
+    }
+
+    // Einmalig: GHOST-Token anlegen, Vault-Template festlegen.
+    entry init(byte[32] newVaultTemplateHash, int ghostOutIdx, byte[] ghostPrefix, byte[] ghostSuffix, sig s) {
+        require(!initialized);
+        require(checkSig(s, deployer));
+        byte[32] myCov = OpInputCovenantId(this.activeInputIndex);
+        byte[32] gid = freshGenesis(ghostOutIdx);
+        validateOutputStateWithTemplate(
+            ghostOutIdx,
+            GhostState { ownerIdentifier: myCov, identifierType: IDENTIFIER_COVENANT_ID, amount: 0, isMinter: true },
+            ghostPrefix,
+            ghostSuffix,
+            ghostTemplateHash
+        );
+        continuation(gid, newVaultTemplateHash);
+    }
+
+    // Jeder darf einen Vault für `owner` eröffnen.
+    entry openVault(byte[32] owner, int vaultOutIdx, byte[] vaultPrefix, byte[] vaultSuffix, GhostState[] outStates) {
+        require(initialized);
+        byte[32] myCov = OpInputCovenantId(this.activeInputIndex);
+
+        // der neue Vault: frische ID, geprüftes Template, keine Schuld
+        byte[32] vid = freshGenesis(vaultOutIdx);
+        require(tx.outputs[vaultOutIdx].value <= MAX_COLLATERAL);
+        validateOutputStateWithTemplate(vaultOutIdx, VaultState { owner: owner, debt: 0, interest: 0, indexAt: 0 }, vaultPrefix, vaultSuffix, vaultTemplateHash);
+
+        // GHOST-Seite: rein nur der eigene Wurzel-Minter, raus dessen
+        // unveränderte Fortsetzung und der Minter-Zweig des neuen Vaults
+        require(OpCovInputCount(ghostCovId) == 1);
+        int rootIn = OpCovInputIdx(ghostCovId, 0);
+        GhostState root = readInputStateWithTemplate(rootIn, ghostPrefixLen, ghostSuffixLen, ghostTemplateHash);
+        require(root.isMinter);
+        require(root.identifierType == IDENTIFIER_COVENANT_ID);
+        require(root.ownerIdentifier == myCov);
+        require(root.amount == 0);
+
+        require(OpCovOutputCount(ghostCovId) == 2);
+        require(outStates.length == 2);
+        GhostState o0 = outStates[0];
+        require(o0.isMinter);
+        require(o0.identifierType == IDENTIFIER_COVENANT_ID);
+        require(o0.ownerIdentifier == myCov);
+        require(o0.amount == 0);
+        GhostState o1 = outStates[1];
+        require(o1.isMinter);
+        require(o1.identifierType == IDENTIFIER_COVENANT_ID);
+        require(o1.ownerIdentifier == vid);
+        require(o1.amount == 0);
+        // KAS des Wurzel-Minters bleiben (Fix-Review N-11: vorher konnte jeder
+        // beim openVault bis auf 1 sompi abziehen)
+        require(tx.outputs[OpCovOutputIdx(ghostCovId, 0)].value == tx.inputs[rootIn].value);
+        validateOutputStateWithInputTemplate(OpCovOutputIdx(ghostCovId, 0), o0, rootIn, ghostPrefixLen, ghostSuffixLen, ghostTemplateHash);
+        validateOutputStateWithInputTemplate(OpCovOutputIdx(ghostCovId, 1), o1, rootIn, ghostPrefixLen, ghostSuffixLen, ghostTemplateHash);
+
+        continuation(ghostCovId, vaultTemplateHash);
+    }
+}
